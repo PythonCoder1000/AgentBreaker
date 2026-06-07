@@ -31,3 +31,21 @@ WEB_SEARCH_MAX_USES = 5
 TOOLS = [
     {"type": "web_search_20260209", "name": "web_search", "max_uses": WEB_SEARCH_MAX_USES},
 ]
+
+# --- Conversation UI ---
+USER_PREFIX = "[User]: "
+AGENT_PREFIX = "[Agent]: "
+
+# Loading spinner shown while the agent is working (Claude-CLI style). Only
+# animated on a TTY; piped/redirected output skips the animation.
+THINKING_LABEL = "Thinking..."
+SEARCHING_LABEL = "Searching..."
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_INTERVAL = 0.08  # seconds between frames
+
+# How tool activity is rendered under the spinner, e.g. ⏺ web_search("query").
+TOOL_BULLET = "⏺"
+RESULT_PREFIX = "  ⎿ "
+
+# Shown when the server-side search loop is still paused after the resume cap.
+TRUNCATION_NOTICE = "[truncated — search budget exhausted]"
