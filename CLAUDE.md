@@ -31,6 +31,13 @@ If I say "commit this", "push this", "save this", or anything similar — **do b
 
 At the end of each of my prompts that touches code, **run the `code-auditor` agent** to check for major security problems before considering the task done. Surface anything it finds; fix critical issues immediately.
 
+## Rule 4 — Auto-commit when work is complete
+
+Once the changes for a request are finished and verified, **commit and push automatically** (per Rule 2 — both actions, split into logical commits) without waiting for me to say "commit".
+
+- **Exception:** if the task requires external setup on my end (e.g. installing a tool, creating an account, providing credentials/API keys, running an interactive login, manual config) — **stop and tell me what to do first**, and do not commit until I confirm it's done.
+- Don't auto-commit work that is incomplete, unverified, or known to be broken. If you're unsure whether something works, say so instead of committing.
+
 ---
 
 ## High-level recommendations
