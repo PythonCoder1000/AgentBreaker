@@ -33,8 +33,8 @@ AgentBreaker/
 
 ## Conventions
 
-- Keep secrets out of the repo — use a local `.env` (already gitignored) and
-  commit a `.env.example` describing the expected variables.
+- Keep secrets out of the repo — both `.env` and `.env.template` are gitignored.
+  Copy `.env.template` to `.env` and fill in your `ANTHROPIC_API_KEY`.
 - Commits are split into small, logical units; commit messages follow the
   conventional style (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 
