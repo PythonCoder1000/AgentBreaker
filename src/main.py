@@ -1,30 +1,33 @@
 """A minimal agent loop: the user asks a question, the agent answers.
 
 Keeps a running conversation history so follow-up questions have context.
-While the agent works, a "[Agent]: Thinking..." spinner runs, and each tool the
-agent uses is printed underneath it (Claude-CLI style).
+While the agent works, a "[Agent]: Thinking..." spinner runs and each tool the
+agent uses is printed underneath it; the answer is rendered as live markdown as
+it streams (Claude-CLI style), via `rich`.
 Type 'exit' or 'quit' (or press Ctrl-C / Ctrl-D) to leave.
 """
 
-import itertools
 import os
 import re
 import sys
-import threading
-import time
 
 import anthropic
 from dotenv import load_dotenv
+from rich.console import Console, Group
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.spinner import Spinner
+from rich.text import Text
 
 from settings import (
     AGENT_PREFIX,
+    LIVE_REFRESH_PER_SECOND,
     MAX_TOKENS,
     MAX_TOOL_CONTINUATIONS,
     MODEL,
     RESULT_PREFIX,
     SEARCHING_LABEL,
-    SPINNER_FRAMES,
-    SPINNER_INTERVAL,
+    SPINNER_STYLE,
     SYSTEM_PROMPT,
     THINKING_LABEL,
     TOOL_BULLET,
@@ -33,8 +36,8 @@ from settings import (
     USER_PREFIX,
 )
 
-_CLEAR_LINE = "\r\033[K"  # carriage return + clear-to-end-of-line
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")  # C0 controls (incl. ESC) + DEL
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")  # all C0 controls (incl. ESC) + DEL
+_MD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # same, but keeps \t and \n
 
 
 def _sanitize(text: str) -> str:
@@ -48,54 +51,20 @@ def _sanitize(text: str) -> str:
     return _CONTROL_CHARS.sub("", text)
 
 
-class Spinner:
-    """A single-line 'label …' spinner driven by a background thread.
+def _sanitize_markdown(text: str) -> str:
+    """Strip control bytes from answer text before rendering it as markdown.
 
-    Animates only on a TTY; under a pipe it's a no-op so logs stay clean.
-    `start()` replaces any running spinner; `stop()` clears the line and joins
-    the thread, so callers can safely print immediately afterward.
+    `rich` only strips a handful of control codes (not ESC), so adversarial web
+    content that steers the model into emitting a raw escape could otherwise
+    drive the terminal. Newline and tab are preserved so markdown structure
+    (lists, code blocks, paragraphs) still renders.
     """
-
-    def __init__(self, prefix: str) -> None:
-        self._prefix = prefix
-        self._enabled = sys.stdout.isatty()
-        self._stop: threading.Event | None = None
-        self._thread: threading.Thread | None = None
-
-    def start(self, label: str) -> None:
-        self.stop()
-        if not self._enabled:
-            return
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._spin, args=(label,), daemon=True)
-        self._thread.start()
-
-    def _spin(self, label: str) -> None:
-        assert self._stop is not None
-        for frame in itertools.cycle(SPINNER_FRAMES):
-            if self._stop.is_set():
-                break
-            print(f"\r{self._prefix}{label} {frame}", end="", flush=True)
-            time.sleep(SPINNER_INTERVAL)
-
-    def stop(self) -> None:
-        if self._stop is None:
-            return
-        self._stop.set()
-        try:
-            if self._thread is not None:
-                self._thread.join()
-        finally:
-            # Always erase the spinner line and reset, even if join() is
-            # interrupted (e.g. a second Ctrl-C), so the terminal isn't left dirty.
-            print(_CLEAR_LINE, end="", flush=True)
-            self._stop = None
-            self._thread = None
+    return _MD_CONTROL_CHARS.sub("", text)
 
 
-def _tool_line(query: str) -> str:
-    """Render a web_search invocation as a Claude-CLI-style line."""
-    return f'{TOOL_BULLET} web_search("{_sanitize(query)}")'
+def _tool_line(query: str) -> Text:
+    """A web_search invocation as a Claude-CLI-style line (literal, no markup)."""
+    return Text(f'{TOOL_BULLET} web_search("{_sanitize(query)}")')
 
 
 def _result_count(block: object) -> int | None:
@@ -104,79 +73,92 @@ def _result_count(block: object) -> int | None:
     return len(content) if isinstance(content, list) else None
 
 
-def stream_turn(client: anthropic.Anthropic, messages: list[dict]) -> str:
+def stream_turn(
+    client: anthropic.Anthropic, messages: list[dict], console: Console
+) -> str:
     """Stream one user turn and return the assistant's text.
 
-    Iterates the raw event stream so tool activity can be surfaced live. While
-    waiting on the model a spinner runs; as the agent calls `web_search`, each
-    query is printed, then a spinner runs while the server fetches results.
+    A single `rich` Live region shows, top to bottom: each web_search the agent
+    ran (with a results count), then either a spinner (while working) or the
+    answer rendered as markdown that updates live as text streams.
 
-    `web_search` is a server-side tool, so the streamed text already reflects
-    the results. If the server-side loop pauses (`stop_reason == "pause_turn"`),
-    the partial assistant turn is appended and re-sent to resume, up to
+    `web_search` is a server-side tool, so the streamed text already reflects the
+    results. If the server-side loop pauses (`stop_reason == "pause_turn"`), the
+    partial assistant turn is appended and re-sent to resume, up to
     MAX_TOOL_CONTINUATIONS times. `messages` is a working list the caller owns.
     """
-    spinner = Spinner(AGENT_PREFIX)
     answer_parts: list[str] = []
-    # Persists across pause_turn resumes so "[Agent]: " prints once per turn,
-    # not once per stream and not once per (citation-split) text block.
-    text_started = False
-    try:
-        for _ in range(MAX_TOOL_CONTINUATIONS + 1):
-            spinner.start(THINKING_LABEL)
-            with client.messages.stream(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            ) as stream:
-                for event in stream:
-                    if event.type == "content_block_start":
-                        spinner.stop()  # something is about to print or stream
-                        block = event.content_block
-                        if (
-                            block.type == "server_tool_use"
-                            and getattr(block, "name", None) == "web_search"
-                        ):
-                            inp = getattr(block, "input", None)
-                            query = inp.get("query", "") if isinstance(inp, dict) else ""
-                            print(_tool_line(query), flush=True)
-                            spinner.start(SEARCHING_LABEL)  # server runs the search
-                        elif block.type == "web_search_tool_result":
-                            n = _result_count(block)
-                            if n is not None:
-                                print(f"{RESULT_PREFIX}{n} results", flush=True)
-                            if not text_started:
-                                spinner.start(THINKING_LABEL)
-                        elif block.type == "text":
-                            if not text_started:
-                                print(AGENT_PREFIX, end="", flush=True)
-                                text_started = True
-                        elif not text_started:
-                            # Internal plumbing of dynamic web search
-                            # (code_execution and its results). Don't surface it;
-                            # just keep the spinner running.
-                            spinner.start(THINKING_LABEL)
-                    elif event.type == "content_block_delta":
-                        delta = event.delta
-                        if delta.type == "text_delta":
-                            answer_parts.append(delta.text)
-                            print(delta.text, end="", flush=True)
-                        # input_json_delta ignored: web_search's query is complete
-                        # at content_block_start; other tool inputs aren't shown.
-                final = stream.get_final_message()
+    tool_lines: list[Text] = []  # persistent activity shown above the answer
+    label = THINKING_LABEL
+    streaming = False  # True once the answer's text starts arriving
+    working = True  # False once the turn is done (drops the spinner)
 
-            spinner.stop()
-            if final.stop_reason != "pause_turn":
-                break
-            # Resume: re-send with the paused assistant content appended.
-            messages.append({"role": "assistant", "content": final.content})
-        else:
-            # Loop ran out while still paused — the answer is cut short.
-            print(f"\n{TRUNCATION_NOTICE}", flush=True)
-    finally:
-        spinner.stop()
+    def render() -> Group:
+        body: list = list(tool_lines)
+        if streaming:
+            body.append(Text(AGENT_PREFIX, style="bold"))
+            body.append(Markdown(_sanitize_markdown("".join(answer_parts))))
+        elif working:
+            body.append(
+                Spinner(SPINNER_STYLE, text=Text(f"{AGENT_PREFIX}{label}"))
+            )
+        return Group(*body)
+
+    with Live(
+        render(),
+        console=console,
+        refresh_per_second=LIVE_REFRESH_PER_SECOND,
+        vertical_overflow="visible",
+    ) as live:
+        try:
+            for _ in range(MAX_TOOL_CONTINUATIONS + 1):
+                with client.messages.stream(
+                    model=MODEL,
+                    max_tokens=MAX_TOKENS,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOLS,
+                    messages=messages,
+                ) as stream:
+                    for event in stream:
+                        if event.type == "content_block_start":
+                            block = event.content_block
+                            if (
+                                block.type == "server_tool_use"
+                                and getattr(block, "name", None) == "web_search"
+                            ):
+                                inp = getattr(block, "input", None)
+                                query = (
+                                    inp.get("query", "")
+                                    if isinstance(inp, dict)
+                                    else ""
+                                )
+                                tool_lines.append(_tool_line(query))
+                                label = SEARCHING_LABEL
+                            elif block.type == "web_search_tool_result":
+                                n = _result_count(block)
+                                if n is not None:
+                                    tool_lines.append(Text(f"{RESULT_PREFIX}{n} results"))
+                                label = THINKING_LABEL
+                            elif block.type == "text":
+                                streaming = True
+                            live.update(render())
+                        elif event.type == "content_block_delta":
+                            if event.delta.type == "text_delta":
+                                answer_parts.append(event.delta.text)
+                                live.update(render())
+                    final = stream.get_final_message()
+
+                if final.stop_reason != "pause_turn":
+                    break
+                # Resume: re-send with the paused assistant content appended.
+                messages.append({"role": "assistant", "content": final.content})
+            else:
+                # Loop ran out while still paused — the answer is cut short.
+                tool_lines.append(Text(TRUNCATION_NOTICE))
+        finally:
+            # Drop the spinner from the final, frozen frame (success or error).
+            working = False
+            live.update(render())
 
     return "".join(answer_parts)
 
@@ -192,6 +174,7 @@ def main() -> None:
         )
 
     client = anthropic.Anthropic(api_key=api_key)
+    console = Console()
     messages: list[dict] = []
 
     print(f"AgentBreaker chat ({MODEL}). Type 'exit' to quit.\n")
@@ -213,7 +196,7 @@ def main() -> None:
         working = messages + [{"role": "user", "content": question}]
 
         try:
-            answer = stream_turn(client, working)
+            answer = stream_turn(client, working, console)
         except anthropic.APIError as exc:
             print(f"\n[API error: {exc}]")
             continue  # history untouched; drop this turn
@@ -224,10 +207,10 @@ def main() -> None:
             # No text came back (empty refusal, hit max_tokens before any text,
             # etc.). Appending an empty assistant turn would make the API reject
             # every following request, so drop this turn instead.
-            print("\n[no response]")
+            print("[no response]")
             continue
 
-        print("\n")
+        print()  # blank line before the next prompt
         messages.append({"role": "user", "content": question})
         messages.append({"role": "assistant", "content": answer})
 

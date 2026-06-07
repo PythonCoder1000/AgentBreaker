@@ -36,12 +36,15 @@ TOOLS = [
 USER_PREFIX = "[User]: "
 AGENT_PREFIX = "[Agent]: "
 
-# Loading spinner shown while the agent is working (Claude-CLI style). Only
-# animated on a TTY; piped/redirected output skips the animation.
+# Loading spinner shown while the agent is working (Claude-CLI style). Rendered
+# via `rich`; only animated on a TTY (piped output renders the final frame once).
 THINKING_LABEL = "Thinking..."
 SEARCHING_LABEL = "Searching..."
-SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-SPINNER_INTERVAL = 0.08  # seconds between frames
+
+# `rich` spinner name (run `python -m rich.spinner` to see them all). The refresh
+# rate drives both the spinner animation and the live markdown re-render.
+SPINNER_STYLE = "dots"
+LIVE_REFRESH_PER_SECOND = 12
 
 # How tool activity is rendered under the spinner, e.g. ⏺ web_search("query").
 TOOL_BULLET = "⏺"
