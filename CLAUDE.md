@@ -40,6 +40,15 @@ Once the changes for a request are finished and verified, **commit and push auto
 
 ---
 
+## Code rules
+
+- **Always put specific values into a `settings.py`.** Concrete configuration — model IDs, token limits, system prompts, tool specs, timeouts, file paths, magic numbers — belongs in a dedicated `settings.py` module, not hard-coded inline in application code. Import the values from there.
+  - Keep `settings.py` free of logic — it holds values only.
+  - Never put secrets (API keys, tokens) in `settings.py`; those stay in `.env` and are read via environment variables.
+  - When you introduce a new tunable value, add it to `settings.py` rather than scattering literals across modules.
+
+---
+
 ## High-level recommendations
 
 - **Understand before editing.** Read the surrounding code and match its style, naming, and idioms rather than imposing new patterns.
