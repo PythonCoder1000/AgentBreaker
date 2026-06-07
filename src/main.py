@@ -191,6 +191,8 @@ def main() -> None:
         if question.lower() in {"exit", "quit"}:
             break
 
+        print()  # blank line between the user's question and the agent's output
+
         # Work on a copy so a server-tool `pause_turn` (which appends partial
         # assistant blocks) doesn't leak into the durable text history.
         working = messages + [{"role": "user", "content": question}]
