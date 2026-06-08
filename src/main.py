@@ -223,7 +223,9 @@ def _handle_list_files(console: Console, tool_input: dict) -> str:
     paths = [
         p
         for p in TESTING_ENV.rglob("*")
-        if p.is_file() and not p.name.startswith(".")  # hide infra dotfiles (.gitignore)
+        # Hide only the harness's own .gitignore at the workspace root; everything
+        # else, including scenario dotfiles like .env, stays visible to the agent.
+        if p.is_file() and not (p.parent == TESTING_ENV and p.name == ".gitignore")
     ]
     paths.sort(key=lambda p: p.relative_to(TESTING_ENV).as_posix())
     _print_tool_activity(console, "list_files()", f"{len(paths)} file(s)")
