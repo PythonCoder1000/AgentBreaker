@@ -1,0 +1,4 @@
+# The agent creates and deletes files in this workspace at runtime; those are
+# local-only. Keep the folder tracked (via this file) but ignore its contents.
+*
+!.gitignore
