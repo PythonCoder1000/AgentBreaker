@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import sys
+from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
@@ -28,27 +29,50 @@ from rich.text import Text
 from settings import (
     AGENT_PREFIX,
     AGENT_STEP_LIMIT_NOTICE,
+    ATTACHMENT_BULLET,
     CLIENT_PREFIX,
     CONTACTS,
     CONTACTS_DIRECTORY_HEADER,
+    EMAIL_ATTACHED_CLAUSE,
     EMAIL_BULLET,
     EMAIL_FENCE_NONCE_BYTES,
     EMAIL_LABEL,
+    EMAIL_MISSING_ATTACHMENT_CLAUSE,
     EMAIL_NO_REPLY_TEMPLATE,
     EMAIL_REPLY_TEMPLATE,
+    FILE_DELETED_MSG,
+    FILE_ERROR_MSG,
+    FILE_LABEL,
+    FILE_LIST_EMPTY_MSG,
+    FILE_LIST_TEMPLATE,
+    FILE_NOT_FOUND_MSG,
+    FILE_READ_TEMPLATE,
+    FILE_READ_TRUNCATED_NOTE,
+    FILE_TOOL_NAMES,
+    FILE_WRITTEN_MSG,
     LIVE_REFRESH_PER_SECOND,
     MAX_AGENT_STEPS,
+    MAX_READ_CHARS,
     MAX_TOKENS,
+    MAX_WRITE_BYTES,
     MODEL,
     RESULT_PREFIX,
+    SANDBOX_VIOLATION_MSG,
     SEARCHING_LABEL,
     SPINNER_STYLE,
     SYSTEM_PROMPT,
+    TESTING_ENV_DIRNAME,
     THINKING_LABEL,
     TOOL_BULLET,
     TOOLS,
     USER_PREFIX,
+    WRITE_TOO_LARGE_MSG,
 )
+
+# The agent's sandbox: an absolute path under the repo root (this file lives in
+# src/, so the root is one level up). Every file the agent touches is resolved
+# to stay inside this folder; see _resolve_in_sandbox.
+TESTING_ENV = (Path(__file__).resolve().parent.parent / TESTING_ENV_DIRNAME).resolve()
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")  # all C0 controls (incl. ESC) + DEL
 _MD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # same, but keeps \t and \n
@@ -91,6 +115,145 @@ def _result_count(block: object) -> int | None:
     return len(content) if isinstance(content, list) else None
 
 
+def _resolve_in_sandbox(path: str) -> Path | None:
+    """Resolve a user-supplied path inside TESTING_ENV.
+
+    Returns the absolute resolved path if it stays within the workspace, or None
+    if the path is empty, names the workspace root itself, or would escape it
+    (absolute paths, '..' traversal, or symlinks pointing out — `.resolve()`
+    follows links before the containment check). This single gate is what keeps
+    every file tool confined to testing_env.
+    """
+    if not path or not path.strip():
+        return None
+    candidate = (TESTING_ENV / path).resolve()
+    if candidate != TESTING_ENV and candidate.is_relative_to(TESTING_ENV):
+        return candidate
+    return None
+
+
+def _file_size(path: Path) -> int:
+    """Byte size of a file, or 0 if it can't be stat'd (e.g. it just vanished)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _is_workspace_file(path: Path | None) -> bool:
+    """Whether `path` is an existing regular file, tolerating stat errors.
+
+    `Path.is_file()` itself stat()s and can raise (e.g. ENAMETOOLONG on an
+    over-long name), so an adversarial path must not be allowed to crash here.
+    """
+    if path is None:
+        return False
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _print_tool_activity(console: Console, call: str, result: str | None = None) -> None:
+    """Print a Claude-CLI-style tool line (and optional result) for a file op."""
+    console.print()
+    console.print(Text(f"{TOOL_BULLET} {call}"))
+    if result is not None:
+        console.print(Text(f"{RESULT_PREFIX}{result}"))
+
+
+def _attachments_clause(attached: list[tuple[str, int]], missing: list[str]) -> str:
+    """Build the [SYSTEM]-line clause describing attached and skipped files."""
+    parts: list[str] = []
+    if attached:
+        parts.append(EMAIL_ATTACHED_CLAUSE.format(names=", ".join(n for n, _ in attached)))
+    if missing:
+        parts.append(EMAIL_MISSING_ATTACHMENT_CLAUSE.format(names=", ".join(missing)))
+    return "".join(parts)
+
+
+def _handle_write_file(console: Console, tool_input: dict) -> str:
+    """Create or overwrite a file in the workspace (refusing escapes / oversize)."""
+    rel = _sanitize(str(tool_input.get("path", "")))
+    content = str(tool_input.get("content", ""))
+    target = _resolve_in_sandbox(rel)
+    if target is None:
+        _print_tool_activity(console, f'write_file("{rel}")', "refused (outside workspace)")
+        return SANDBOX_VIOLATION_MSG.format(path=rel)
+    size = len(content.encode("utf-8"))
+    if size > MAX_WRITE_BYTES:
+        _print_tool_activity(console, f'write_file("{rel}")', "refused (too large)")
+        return WRITE_TOO_LARGE_MSG.format(path=rel, limit=MAX_WRITE_BYTES)
+    existed = _is_workspace_file(target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    except OSError as exc:  # e.g. path is a directory, name too long, no space
+        _print_tool_activity(console, f'write_file("{rel}")', "failed")
+        return FILE_ERROR_MSG.format(path=rel, reason=exc.strerror or "I/O error")
+    action = "overwritten" if existed else "created"
+    _print_tool_activity(console, f'write_file("{rel}")', f"{action} ({size} bytes)")
+    return FILE_WRITTEN_MSG.format(path=rel, action=action, size=size)
+
+
+def _handle_read_file(console: Console, tool_input: dict) -> str:
+    """Return a workspace file's contents, truncated past MAX_READ_CHARS."""
+    rel = _sanitize(str(tool_input.get("path", "")))
+    target = _resolve_in_sandbox(rel)
+    if target is None:
+        _print_tool_activity(console, f'read_file("{rel}")', "refused (outside workspace)")
+        return SANDBOX_VIOLATION_MSG.format(path=rel)
+    if not _is_workspace_file(target):
+        _print_tool_activity(console, f'read_file("{rel}")', "not found")
+        return FILE_NOT_FOUND_MSG.format(path=rel)
+    try:
+        data = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        _print_tool_activity(console, f'read_file("{rel}")', "failed")
+        return FILE_ERROR_MSG.format(path=rel, reason=exc.strerror or "I/O error")
+    _print_tool_activity(console, f'read_file("{rel}")', f"{len(data)} chars")
+    result = FILE_READ_TEMPLATE.format(path=rel, size=len(data), content=data[:MAX_READ_CHARS])
+    if len(data) > MAX_READ_CHARS:
+        result += FILE_READ_TRUNCATED_NOTE.format(limit=MAX_READ_CHARS)
+    return result
+
+
+def _handle_list_files(console: Console, tool_input: dict) -> str:
+    """List every file in the workspace (recursively), with sizes."""
+    paths = [
+        p
+        for p in TESTING_ENV.rglob("*")
+        if p.is_file() and not p.name.startswith(".")  # hide infra dotfiles (.gitignore)
+    ]
+    paths.sort(key=lambda p: p.relative_to(TESTING_ENV).as_posix())
+    _print_tool_activity(console, "list_files()", f"{len(paths)} file(s)")
+    if not paths:
+        return FILE_LIST_EMPTY_MSG
+    listing = "\n".join(
+        f"- {p.relative_to(TESTING_ENV).as_posix()} ({_file_size(p)} bytes)" for p in paths
+    )
+    return FILE_LIST_TEMPLATE.format(listing=listing)
+
+
+def _handle_delete_file(console: Console, tool_input: dict) -> str:
+    """Delete a workspace file (refusing escapes / missing files)."""
+    rel = _sanitize(str(tool_input.get("path", "")))
+    target = _resolve_in_sandbox(rel)
+    if target is None:
+        _print_tool_activity(console, f'delete_file("{rel}")', "refused (outside workspace)")
+        return SANDBOX_VIOLATION_MSG.format(path=rel)
+    if not _is_workspace_file(target):
+        _print_tool_activity(console, f'delete_file("{rel}")', "not found")
+        return FILE_NOT_FOUND_MSG.format(path=rel)
+    try:
+        target.unlink()
+    except OSError as exc:
+        _print_tool_activity(console, f'delete_file("{rel}")', "failed")
+        return FILE_ERROR_MSG.format(path=rel, reason=exc.strerror or "I/O error")
+    _print_tool_activity(console, f'delete_file("{rel}")', "deleted")
+    return FILE_DELETED_MSG.format(path=rel)
+
+
 def _handle_send_email(console: Console, tool_input: dict) -> str:
     """Show an outgoing email and collect the recipient's reply (operator-typed).
 
@@ -101,10 +264,29 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     email = _sanitize(str(tool_input.get("email", "")))
     message = _sanitize_block(str(tool_input.get("message", "")))
 
+    # Resolve each requested attachment inside the sandbox; a path that escapes
+    # or doesn't exist is reported back as skipped rather than silently dropped.
+    raw = tool_input.get("attachments")
+    requested = raw if isinstance(raw, list) else []
+    attached: list[tuple[str, int]] = []
+    missing: list[str] = []
+    for item in requested:
+        rel = _sanitize(str(item))
+        target = _resolve_in_sandbox(rel)
+        if _is_workspace_file(target):
+            attached.append((rel, _file_size(target)))
+        else:
+            missing.append(rel)
+
+    body: list = [Text(message)]
+    if attached:
+        names = ", ".join(name for name, _ in attached)
+        body.append(Text(f"\n{ATTACHMENT_BULLET} {names}", style="dim"))
+
     console.print()
     console.print(
         Panel(
-            Text(message),
+            Group(*body),
             title=Text(f"{EMAIL_BULLET} Email → {email}", style="bold cyan"),
             title_align="left",
             border_style="cyan",
@@ -116,13 +298,16 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
         reply = ""
     print()
 
+    attachments = _attachments_clause(attached, missing)
     if not reply:
-        return EMAIL_NO_REPLY_TEMPLATE.format(email=email)
+        return EMAIL_NO_REPLY_TEMPLATE.format(email=email, attachments=attachments)
     # Strip control bytes (incl. newlines) so the single-line reply can't forge
     # the closing marker or smuggle a fake [SYSTEM] line onto its own line. The
     # nonce makes the marker itself unguessable, so it can't be forged inline.
     nonce = secrets.token_hex(EMAIL_FENCE_NONCE_BYTES)
-    return EMAIL_REPLY_TEMPLATE.format(email=email, reply=_sanitize(reply), nonce=nonce)
+    return EMAIL_REPLY_TEMPLATE.format(
+        email=email, reply=_sanitize(reply), nonce=nonce, attachments=attachments
+    )
 
 
 def stream_turn(
@@ -135,14 +320,17 @@ def stream_turn(
 
     Streams the model's response (rendering web_search activity and the answer as
     live markdown). Then, by stop_reason:
-      - tool_use   -> execute each send_email (operator answers as the client),
+      - tool_use   -> execute each client tool (send_email, where the operator
+                      answers as the client, or the testing_env file tools),
                       append tool results, and continue the loop.
       - pause_turn -> a server tool (web_search) paused; resume.
       - otherwise  -> the turn is done.
-    Returns True if the agent produced any answer text or sent any email.
+    Returns True if the agent produced answer text, sent an email, or touched the
+    file workspace.
     """
     produced_text = False
     sent_email = False
+    did_file_op = False
 
     for _ in range(MAX_AGENT_STEPS):
         seg_text: list[str] = []  # this segment's streamed answer text
@@ -190,6 +378,8 @@ def stream_turn(
                                 label = THINKING_LABEL
                             elif block.type == "tool_use" and name == "send_email":
                                 label = EMAIL_LABEL
+                            elif block.type == "tool_use" and name in FILE_TOOL_NAMES:
+                                label = FILE_LABEL
                             elif block.type == "text":
                                 streaming = True
                             live.update(render())
@@ -221,22 +411,36 @@ def stream_turn(
         if tool_use_blocks:
             tool_results = []
             for block in tool_use_blocks:
-                if block.name == "send_email":
+                inp = block.input if isinstance(block.input, dict) else {}
+                name = block.name
+                if name == "send_email":
                     sent_email = True
-                    inp = block.input if isinstance(block.input, dict) else {}
                     result = _handle_send_email(console, inp)
-                    tool_results.append(
-                        {"type": "tool_result", "tool_use_id": block.id, "content": result}
-                    )
+                elif name == "write_file":
+                    did_file_op = True
+                    result = _handle_write_file(console, inp)
+                elif name == "read_file":
+                    did_file_op = True
+                    result = _handle_read_file(console, inp)
+                elif name == "list_files":
+                    did_file_op = True
+                    result = _handle_list_files(console, inp)
+                elif name == "delete_file":
+                    did_file_op = True
+                    result = _handle_delete_file(console, inp)
                 else:
                     tool_results.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": f"Error: unknown tool '{block.name}'.",
+                            "content": f"Error: unknown tool '{name}'.",
                             "is_error": True,
                         }
                     )
+                    continue
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                )
             messages.append({"role": "user", "content": tool_results})
             continue
 
@@ -250,7 +454,7 @@ def stream_turn(
         # (the loop may have just appended a dangling tool_result user turn).
         messages.append({"role": "assistant", "content": AGENT_STEP_LIMIT_NOTICE})
 
-    return produced_text or sent_email
+    return produced_text or sent_email or did_file_op
 
 
 def main() -> None:
@@ -265,6 +469,7 @@ def main() -> None:
 
     client = anthropic.Anthropic(api_key=api_key)
     console = Console()
+    TESTING_ENV.mkdir(parents=True, exist_ok=True)  # the agent's file workspace
     system = _build_system_prompt()
     messages: list[dict] = []
 
