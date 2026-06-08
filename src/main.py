@@ -1,9 +1,10 @@
 """A minimal agent loop with a simulated deployment environment.
 
-The agent believes it is a live personal assistant with real tools: web_search
-and send_email. When it calls send_email, the harness shows the message to the
-human operator, who replies *as the client*; that reply is fed back to the agent
-as the tool result — the agent never learns a human is on the other end.
+The agent believes it is a live personal assistant with real tools: web_search,
+send_email, and run_bash (a real shell over the project directory). When it calls
+send_email, the harness shows the message to the human operator, who replies *as
+the client*; that reply is fed back to the agent as the tool result — the agent
+never learns a human is on the other end.
 
 The operator drives the agent through "[User]: " prompts (assigning tasks) and
 answers the agent's emails through "[Client]: " prompts. Tool activity and the
@@ -14,6 +15,8 @@ Type 'exit' or 'quit' (or press Ctrl-C / Ctrl-D) to leave.
 import os
 import re
 import secrets
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,6 +33,15 @@ from settings import (
     AGENT_PREFIX,
     AGENT_STEP_LIMIT_NOTICE,
     ATTACHMENT_BULLET,
+    BASH_ERROR_MSG,
+    BASH_EXECUTABLE,
+    BASH_LABEL,
+    BASH_MAX_OUTPUT_CHARS,
+    BASH_NO_OUTPUT,
+    BASH_RESULT_TEMPLATE,
+    BASH_TIMEOUT_MSG,
+    BASH_TIMEOUT_SECONDS,
+    BASH_TRUNCATED_NOTE,
     CLIENT_PREFIX,
     CONTACTS,
     CONTACTS_DIRECTORY_HEADER,
@@ -40,24 +52,11 @@ from settings import (
     EMAIL_MISSING_ATTACHMENT_CLAUSE,
     EMAIL_NO_REPLY_TEMPLATE,
     EMAIL_REPLY_TEMPLATE,
-    FILE_DELETED_MSG,
-    FILE_ERROR_MSG,
-    FILE_LABEL,
-    FILE_LIST_EMPTY_MSG,
-    FILE_LIST_TEMPLATE,
-    FILE_NOT_FOUND_MSG,
-    FILE_READ_TEMPLATE,
-    FILE_READ_TRUNCATED_NOTE,
-    FILE_TOOL_NAMES,
-    FILE_WRITTEN_MSG,
     LIVE_REFRESH_PER_SECOND,
     MAX_AGENT_STEPS,
-    MAX_READ_CHARS,
     MAX_TOKENS,
-    MAX_WRITE_BYTES,
     MODEL,
     RESULT_PREFIX,
-    SANDBOX_VIOLATION_MSG,
     SEARCHING_LABEL,
     SPINNER_STYLE,
     SYSTEM_PROMPT,
@@ -66,13 +65,13 @@ from settings import (
     TOOL_BULLET,
     TOOLS,
     USER_PREFIX,
-    WRITE_TOO_LARGE_MSG,
 )
 
-# The agent's sandbox: an absolute path under the repo root (this file lives in
-# src/, so the root is one level up). Every file the agent touches is resolved
-# to stay inside this folder; see _resolve_in_sandbox.
-TESTING_ENV = (Path(__file__).resolve().parent.parent / TESTING_ENV_DIRNAME).resolve()
+# Repo root (this file lives in src/, so the root is one level up). run_bash runs
+# from here, so the agent operates across the whole project directory.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# The scenario folder (seeded by reset_env.py); ensured to exist at startup.
+TESTING_ENV = (PROJECT_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")  # all C0 controls (incl. ESC) + DEL
 _MD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # same, but keeps \t and \n
@@ -115,19 +114,17 @@ def _result_count(block: object) -> int | None:
     return len(content) if isinstance(content, list) else None
 
 
-def _resolve_in_sandbox(path: str) -> Path | None:
-    """Resolve a user-supplied path inside TESTING_ENV.
+def _resolve_in_project(path: str) -> Path | None:
+    """Resolve a user-supplied path inside the project directory.
 
-    Returns the absolute resolved path if it stays within the workspace, or None
-    if the path is empty, names the workspace root itself, or would escape it
-    (absolute paths, '..' traversal, or symlinks pointing out — `.resolve()`
-    follows links before the containment check). This single gate is what keeps
-    every file tool confined to testing_env.
+    Returns the absolute resolved path if it stays within PROJECT_ROOT, or None
+    if the path is empty, names the root itself, or would escape it. Used to
+    confine email attachments to the project tree; run_bash itself is unrestricted.
     """
     if not path or not path.strip():
         return None
-    candidate = (TESTING_ENV / path).resolve()
-    if candidate != TESTING_ENV and candidate.is_relative_to(TESTING_ENV):
+    candidate = (PROJECT_ROOT / path).resolve()
+    if candidate != PROJECT_ROOT and candidate.is_relative_to(PROJECT_ROOT):
         return candidate
     return None
 
@@ -154,14 +151,6 @@ def _is_workspace_file(path: Path | None) -> bool:
         return False
 
 
-def _print_tool_activity(console: Console, call: str, result: str | None = None) -> None:
-    """Print a Claude-CLI-style tool line (and optional result) for a file op."""
-    console.print()
-    console.print(Text(f"{TOOL_BULLET} {call}"))
-    if result is not None:
-        console.print(Text(f"{RESULT_PREFIX}{result}"))
-
-
 def _attachments_clause(attached: list[tuple[str, int]], missing: list[str]) -> str:
     """Build the [SYSTEM]-line clause describing attached and skipped files."""
     parts: list[str] = []
@@ -172,88 +161,79 @@ def _attachments_clause(attached: list[tuple[str, int]], missing: list[str]) -> 
     return "".join(parts)
 
 
-def _handle_write_file(console: Console, tool_input: dict) -> str:
-    """Create or overwrite a file in the workspace (refusing escapes / oversize)."""
-    rel = _sanitize(str(tool_input.get("path", "")))
-    content = str(tool_input.get("content", ""))
-    target = _resolve_in_sandbox(rel)
-    if target is None:
-        _print_tool_activity(console, f'write_file("{rel}")', "refused (outside workspace)")
-        return SANDBOX_VIOLATION_MSG.format(path=rel)
-    size = len(content.encode("utf-8"))
-    if size > MAX_WRITE_BYTES:
-        _print_tool_activity(console, f'write_file("{rel}")', "refused (too large)")
-        return WRITE_TOO_LARGE_MSG.format(path=rel, limit=MAX_WRITE_BYTES)
-    existed = _is_workspace_file(target)
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """SIGKILL the command's whole process group (so a timeout reaps its children too).
+
+    The child is spawned with start_new_session=True, so it leads a new group
+    whose id equals its pid. We signal that pgid *directly* rather than via
+    getpgid(), which raises once the shell leader has exited — e.g. when it
+    backgrounded a job (`... &`) and returned before the timeout fired.
+    """
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-    except OSError as exc:  # e.g. path is a directory, name too long, no space
-        _print_tool_activity(console, f'write_file("{rel}")', "failed")
-        return FILE_ERROR_MSG.format(path=rel, reason=exc.strerror or "I/O error")
-    action = "overwritten" if existed else "created"
-    _print_tool_activity(console, f'write_file("{rel}")', f"{action} ({size} bytes)")
-    return FILE_WRITTEN_MSG.format(path=rel, action=action, size=size)
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:  # group already gone — fall back to killing the leader
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
-def _handle_read_file(console: Console, tool_input: dict) -> str:
-    """Return a workspace file's contents, truncated past MAX_READ_CHARS."""
-    rel = _sanitize(str(tool_input.get("path", "")))
-    target = _resolve_in_sandbox(rel)
-    if target is None:
-        _print_tool_activity(console, f'read_file("{rel}")', "refused (outside workspace)")
-        return SANDBOX_VIOLATION_MSG.format(path=rel)
-    if not _is_workspace_file(target):
-        _print_tool_activity(console, f'read_file("{rel}")', "not found")
-        return FILE_NOT_FOUND_MSG.format(path=rel)
+def _handle_run_bash(console: Console, tool_input: dict) -> str:
+    """Run a shell command from the project root and return its output to the agent.
+
+    Commands are unrestricted within the operator's account — this is a red-team
+    harness by design — but bounded by a timeout and an output cap. The operator
+    sees the command and its (sanitized) output so they can watch what the agent
+    does. Raw output goes back to the model (it is not rendered to the terminal
+    by us, only the [SYSTEM]-framed result is).
+
+    Note: stdout/stderr are buffered fully in memory and only truncated for the
+    result afterward, so the timeout — not the char cap — is the real backstop
+    against a flood (`yes`, `cat /dev/zero`). The child runs in its own process
+    group so a timeout kills any subprocesses it spawned, not just the shell.
+    """
+    command = str(tool_input.get("command", ""))
+
+    console.print()
+    console.print(Text(f"{TOOL_BULLET} run_bash"))
+    console.print(Text(f"{RESULT_PREFIX}$ {_sanitize(command)}"))
+
     try:
-        data = target.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        _print_tool_activity(console, f'read_file("{rel}")', "failed")
-        return FILE_ERROR_MSG.format(path=rel, reason=exc.strerror or "I/O error")
-    _print_tool_activity(console, f'read_file("{rel}")', f"{len(data)} chars")
-    result = FILE_READ_TEMPLATE.format(path=rel, size=len(data), content=data[:MAX_READ_CHARS])
-    if len(data) > MAX_READ_CHARS:
-        result += FILE_READ_TRUNCATED_NOTE.format(limit=MAX_READ_CHARS)
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            executable=BASH_EXECUTABLE,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # merge so output keeps its real ordering
+            text=True,
+            errors="replace",  # never raise on undecodable command output
+            start_new_session=True,  # own process group, so the timeout can reap children
+        )
+    except (OSError, ValueError) as exc:  # e.g. null byte in command, bad executable
+        console.print(Text(f"{RESULT_PREFIX}failed", style="red"))
+        return BASH_ERROR_MSG.format(reason=str(exc) or "could not run command")
+
+    try:
+        output, _ = proc.communicate(timeout=BASH_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        proc.communicate()  # drain pipes / reap the killed leader
+        console.print(Text(f"{RESULT_PREFIX}timed out", style="red"))
+        return BASH_TIMEOUT_MSG.format(seconds=BASH_TIMEOUT_SECONDS)
+
+    output = output or ""
+    truncated = len(output) > BASH_MAX_OUTPUT_CHARS
+    shown = output[:BASH_MAX_OUTPUT_CHARS]
+
+    console.print(Text(f"{RESULT_PREFIX}exit {proc.returncode}"))
+    if shown.strip():
+        console.print(Text(_sanitize_block(shown)))
+
+    result = BASH_RESULT_TEMPLATE.format(code=proc.returncode, output=shown or BASH_NO_OUTPUT)
+    if truncated:
+        result += BASH_TRUNCATED_NOTE.format(limit=BASH_MAX_OUTPUT_CHARS)
     return result
-
-
-def _handle_list_files(console: Console, tool_input: dict) -> str:
-    """List every file in the workspace (recursively), with sizes."""
-    paths = [
-        p
-        for p in TESTING_ENV.rglob("*")
-        # Hide only the harness's own .gitignore at the workspace root; everything
-        # else, including scenario dotfiles like .env, stays visible to the agent.
-        if p.is_file() and not (p.parent == TESTING_ENV and p.name == ".gitignore")
-    ]
-    paths.sort(key=lambda p: p.relative_to(TESTING_ENV).as_posix())
-    _print_tool_activity(console, "list_files()", f"{len(paths)} file(s)")
-    if not paths:
-        return FILE_LIST_EMPTY_MSG
-    listing = "\n".join(
-        f"- {p.relative_to(TESTING_ENV).as_posix()} ({_file_size(p)} bytes)" for p in paths
-    )
-    return FILE_LIST_TEMPLATE.format(listing=listing)
-
-
-def _handle_delete_file(console: Console, tool_input: dict) -> str:
-    """Delete a workspace file (refusing escapes / missing files)."""
-    rel = _sanitize(str(tool_input.get("path", "")))
-    target = _resolve_in_sandbox(rel)
-    if target is None:
-        _print_tool_activity(console, f'delete_file("{rel}")', "refused (outside workspace)")
-        return SANDBOX_VIOLATION_MSG.format(path=rel)
-    if not _is_workspace_file(target):
-        _print_tool_activity(console, f'delete_file("{rel}")', "not found")
-        return FILE_NOT_FOUND_MSG.format(path=rel)
-    try:
-        target.unlink()
-    except OSError as exc:
-        _print_tool_activity(console, f'delete_file("{rel}")', "failed")
-        return FILE_ERROR_MSG.format(path=rel, reason=exc.strerror or "I/O error")
-    _print_tool_activity(console, f'delete_file("{rel}")', "deleted")
-    return FILE_DELETED_MSG.format(path=rel)
 
 
 def _handle_send_email(console: Console, tool_input: dict) -> str:
@@ -266,15 +246,15 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     email = _sanitize(str(tool_input.get("email", "")))
     message = _sanitize_block(str(tool_input.get("message", "")))
 
-    # Resolve each requested attachment inside the sandbox; a path that escapes
-    # or doesn't exist is reported back as skipped rather than silently dropped.
+    # Resolve each requested attachment inside the project directory; a path that
+    # escapes or doesn't exist is reported back as skipped, not silently dropped.
     raw = tool_input.get("attachments")
     requested = raw if isinstance(raw, list) else []
     attached: list[tuple[str, int]] = []
     missing: list[str] = []
     for item in requested:
         rel = _sanitize(str(item))
-        target = _resolve_in_sandbox(rel)
+        target = _resolve_in_project(rel)
         if _is_workspace_file(target):
             attached.append((rel, _file_size(target)))
         else:
@@ -323,16 +303,16 @@ def stream_turn(
     Streams the model's response (rendering web_search activity and the answer as
     live markdown). Then, by stop_reason:
       - tool_use   -> execute each client tool (send_email, where the operator
-                      answers as the client, or the testing_env file tools),
-                      append tool results, and continue the loop.
+                      answers as the client, or run_bash), append tool results,
+                      and continue the loop.
       - pause_turn -> a server tool (web_search) paused; resume.
       - otherwise  -> the turn is done.
-    Returns True if the agent produced answer text, sent an email, or touched the
-    file workspace.
+    Returns True if the agent produced answer text, sent an email, or ran a
+    command.
     """
     produced_text = False
     sent_email = False
-    did_file_op = False
+    did_bash = False
 
     for _ in range(MAX_AGENT_STEPS):
         seg_text: list[str] = []  # this segment's streamed answer text
@@ -380,8 +360,8 @@ def stream_turn(
                                 label = THINKING_LABEL
                             elif block.type == "tool_use" and name == "send_email":
                                 label = EMAIL_LABEL
-                            elif block.type == "tool_use" and name in FILE_TOOL_NAMES:
-                                label = FILE_LABEL
+                            elif block.type == "tool_use" and name == "run_bash":
+                                label = BASH_LABEL
                             elif block.type == "text":
                                 streaming = True
                             live.update(render())
@@ -418,18 +398,9 @@ def stream_turn(
                 if name == "send_email":
                     sent_email = True
                     result = _handle_send_email(console, inp)
-                elif name == "write_file":
-                    did_file_op = True
-                    result = _handle_write_file(console, inp)
-                elif name == "read_file":
-                    did_file_op = True
-                    result = _handle_read_file(console, inp)
-                elif name == "list_files":
-                    did_file_op = True
-                    result = _handle_list_files(console, inp)
-                elif name == "delete_file":
-                    did_file_op = True
-                    result = _handle_delete_file(console, inp)
+                elif name == "run_bash":
+                    did_bash = True
+                    result = _handle_run_bash(console, inp)
                 else:
                     tool_results.append(
                         {
@@ -456,7 +427,7 @@ def stream_turn(
         # (the loop may have just appended a dangling tool_result user turn).
         messages.append({"role": "assistant", "content": AGENT_STEP_LIMIT_NOTICE})
 
-    return produced_text or sent_email or did_file_op
+    return produced_text or sent_email or did_bash
 
 
 def main() -> None:
@@ -471,7 +442,7 @@ def main() -> None:
 
     client = anthropic.Anthropic(api_key=api_key)
     console = Console()
-    TESTING_ENV.mkdir(parents=True, exist_ok=True)  # the agent's file workspace
+    TESTING_ENV.mkdir(parents=True, exist_ok=True)  # ensure the scenario folder exists
     system = _build_system_prompt()
     messages: list[dict] = []
 
