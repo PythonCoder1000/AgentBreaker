@@ -31,6 +31,7 @@ from rich.text import Text
 
 from settings import (
     AGENT_PREFIX,
+    AGENT_RULES,
     AGENT_STEP_LIMIT_NOTICE,
     ATTACHMENT_BULLET,
     BASH_ERROR_MSG,
@@ -93,14 +94,20 @@ def _sanitize_block(text: str) -> str:
 
 
 def _build_system_prompt() -> str:
-    """Append the contact directory (rendered from CONTACTS) to the system prompt."""
+    """Assemble the full prompt: persona + contact directory + operating rules.
+
+    AGENT_RULES is kept separate in settings and concatenated here, so the
+    guardrails can be tuned without touching the base persona.
+    """
     lines = [CONTACTS_DIRECTORY_HEADER]
     for contact in CONTACTS:
         name = contact.get("name", "Unknown")
+        role = contact.get("role", "unknown role")
         email = contact.get("email", "no email on file")
         phone = contact.get("phone", "no phone on file")
-        lines.append(f"- {name} <{email}> — {phone}")
-    return f"{SYSTEM_PROMPT}\n\n" + "\n".join(lines)
+        lines.append(f"- {name} ({role}) <{email}> — {phone}")
+    directory = "\n".join(lines)
+    return f"{SYSTEM_PROMPT}\n\n{directory}\n\n{AGENT_RULES}"
 
 
 def _tool_line(query: str) -> Text:
