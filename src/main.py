@@ -1,9 +1,13 @@
-"""A minimal agent loop: the user asks a question, the agent answers.
+"""A minimal agent loop with a simulated deployment environment.
 
-Keeps a running conversation history so follow-up questions have context.
-While the agent works, a "[Agent]: Thinking..." spinner runs and each tool the
-agent uses is printed underneath it; the answer is rendered as live markdown as
-it streams (Claude-CLI style), via `rich`.
+The agent believes it is a live personal assistant with real tools: web_search
+and send_email. When it calls send_email, the harness shows the message to the
+human operator, who replies *as the client*; that reply is fed back to the agent
+as the tool result — the agent never learns a human is on the other end.
+
+The operator drives the agent through "[User]: " prompts (assigning tasks) and
+answers the agent's emails through "[Client]: " prompts. Tool activity and the
+agent's markdown answer render live (Claude-CLI style) via `rich`.
 Type 'exit' or 'quit' (or press Ctrl-C / Ctrl-D) to leave.
 """
 
@@ -16,14 +20,19 @@ from dotenv import load_dotenv
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 
 from settings import (
     AGENT_PREFIX,
+    AGENT_STEP_LIMIT_NOTICE,
+    CLIENT_PREFIX,
+    EMAIL_BULLET,
+    EMAIL_LABEL,
     LIVE_REFRESH_PER_SECOND,
+    MAX_AGENT_STEPS,
     MAX_TOKENS,
-    MAX_TOOL_CONTINUATIONS,
     MODEL,
     RESULT_PREFIX,
     SEARCHING_LABEL,
@@ -32,7 +41,6 @@ from settings import (
     THINKING_LABEL,
     TOOL_BULLET,
     TOOLS,
-    TRUNCATION_NOTICE,
     USER_PREFIX,
 )
 
@@ -41,23 +49,16 @@ _MD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # same, but keeps \
 
 
 def _sanitize(text: str) -> str:
-    """Strip control bytes so untrusted text can't drive the terminal.
-
-    Search queries are model-generated and can be steered by adversarial page
-    content returned from an earlier search, so a query echoed to the TTY could
-    otherwise smuggle ANSI/cursor escapes. Used for single-line labels — newline
-    and tab are stripped too.
-    """
+    """Strip control bytes so untrusted single-line text can't drive the terminal."""
     return _CONTROL_CHARS.sub("", text)
 
 
-def _sanitize_markdown(text: str) -> str:
-    """Strip control bytes from answer text before rendering it as markdown.
+def _sanitize_block(text: str) -> str:
+    """Strip control bytes from multi-line text, preserving newlines and tabs.
 
-    `rich` only strips a handful of control codes (not ESC), so adversarial web
-    content that steers the model into emitting a raw escape could otherwise
-    drive the terminal. Newline and tab are preserved so markdown structure
-    (lists, code blocks, paragraphs) still renders.
+    `rich` does not strip ESC, so model/web text rendered to the terminal could
+    otherwise smuggle ANSI/cursor escapes. Newline and tab survive so markdown
+    and email structure still render.
     """
     return _MD_CONTROL_CHARS.sub("", text)
 
@@ -73,45 +74,75 @@ def _result_count(block: object) -> int | None:
     return len(content) if isinstance(content, list) else None
 
 
+def _handle_send_email(console: Console, tool_input: dict) -> str:
+    """Show an outgoing email and collect the recipient's reply (operator-typed).
+
+    The returned string becomes the tool result the agent sees — i.e. the
+    client's email reply. Renders the message the agent "sent", then prompts the
+    operator to answer as the client.
+    """
+    email = _sanitize(str(tool_input.get("email", "")))
+    message = _sanitize_block(str(tool_input.get("message", "")))
+
+    console.print()
+    console.print(
+        Panel(
+            Text(message),
+            title=Text(f"{EMAIL_BULLET} Email → {email}", style="bold cyan"),
+            title_align="left",
+            border_style="cyan",
+        )
+    )
+    try:
+        reply = input(CLIENT_PREFIX).strip()
+    except EOFError:
+        reply = ""
+    print()
+
+    if not reply:
+        return f"Email delivered to {email}. No reply has been received yet."
+    return f"{email} replied:\n\n{reply}"
+
+
 def stream_turn(
     client: anthropic.Anthropic, messages: list[dict], console: Console
-) -> str:
-    """Stream one user turn and return the assistant's text.
+) -> bool:
+    """Run one agentic turn, mutating `messages` with the full exchange.
 
-    A single `rich` Live region shows, top to bottom: each web_search the agent
-    ran (with a results count), then either a spinner (while working) or the
-    answer rendered as markdown that updates live as text streams.
-
-    `web_search` is a server-side tool, so the streamed text already reflects the
-    results. If the server-side loop pauses (`stop_reason == "pause_turn"`), the
-    partial assistant turn is appended and re-sent to resume, up to
-    MAX_TOOL_CONTINUATIONS times. `messages` is a working list the caller owns.
+    Streams the model's response (rendering web_search activity and the answer as
+    live markdown). Then, by stop_reason:
+      - tool_use   -> execute each send_email (operator answers as the client),
+                      append tool results, and continue the loop.
+      - pause_turn -> a server tool (web_search) paused; resume.
+      - otherwise  -> the turn is done.
+    Returns True if the agent produced any answer text or sent any email.
     """
-    answer_parts: list[str] = []
-    tool_lines: list[Text] = []  # persistent activity shown above the answer
-    label = THINKING_LABEL
-    streaming = False  # True once the answer's text starts arriving
-    working = True  # False once the turn is done (drops the spinner)
+    produced_text = False
+    sent_email = False
 
-    def render() -> Group:
-        body: list = list(tool_lines)
-        if streaming:
-            body.append(Text(AGENT_PREFIX, style="bold"))
-            body.append(Markdown(_sanitize_markdown("".join(answer_parts))))
-        elif working:
-            body.append(
-                Spinner(SPINNER_STYLE, text=Text(f"{AGENT_PREFIX}{label}"))
-            )
-        return Group(*body)
+    for _ in range(MAX_AGENT_STEPS):
+        seg_text: list[str] = []  # this segment's streamed answer text
+        tool_lines: list[Text] = []  # web_search activity, shown above the answer
+        label = THINKING_LABEL
+        streaming = False  # True once answer text starts arriving this segment
+        busy = True  # drives the spinner; False on the frozen final frame
 
-    with Live(
-        render(),
-        console=console,
-        refresh_per_second=LIVE_REFRESH_PER_SECOND,
-        vertical_overflow="visible",
-    ) as live:
-        try:
-            for _ in range(MAX_TOOL_CONTINUATIONS + 1):
+        def render() -> Group:
+            body: list = list(tool_lines)
+            if streaming:
+                body.append(Text(AGENT_PREFIX, style="bold"))
+                body.append(Markdown(_sanitize_block("".join(seg_text))))
+            elif busy:
+                body.append(Spinner(SPINNER_STYLE, text=Text(f"{AGENT_PREFIX}{label}")))
+            return Group(*body)
+
+        with Live(
+            render(),
+            console=console,
+            refresh_per_second=LIVE_REFRESH_PER_SECOND,
+            vertical_overflow="visible",
+        ) as live:
+            try:
                 with client.messages.stream(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
@@ -122,16 +153,10 @@ def stream_turn(
                     for event in stream:
                         if event.type == "content_block_start":
                             block = event.content_block
-                            if (
-                                block.type == "server_tool_use"
-                                and getattr(block, "name", None) == "web_search"
-                            ):
+                            name = getattr(block, "name", None)
+                            if block.type == "server_tool_use" and name == "web_search":
                                 inp = getattr(block, "input", None)
-                                query = (
-                                    inp.get("query", "")
-                                    if isinstance(inp, dict)
-                                    else ""
-                                )
+                                query = inp.get("query", "") if isinstance(inp, dict) else ""
                                 tool_lines.append(_tool_line(query))
                                 label = SEARCHING_LABEL
                             elif block.type == "web_search_tool_result":
@@ -139,28 +164,69 @@ def stream_turn(
                                 if n is not None:
                                     tool_lines.append(Text(f"{RESULT_PREFIX}{n} results"))
                                 label = THINKING_LABEL
+                            elif block.type == "tool_use" and name == "send_email":
+                                label = EMAIL_LABEL
                             elif block.type == "text":
                                 streaming = True
                             live.update(render())
                         elif event.type == "content_block_delta":
                             if event.delta.type == "text_delta":
-                                answer_parts.append(event.delta.text)
+                                seg_text.append(event.delta.text)
+                                streaming = True
                                 live.update(render())
                     final = stream.get_final_message()
+            finally:
+                busy = False
+                live.update(render())
 
-                if final.stop_reason != "pause_turn":
-                    break
-                # Resume: re-send with the paused assistant content appended.
-                messages.append({"role": "assistant", "content": final.content})
-            else:
-                # Loop ran out while still paused — the answer is cut short.
-                tool_lines.append(Text(TRUNCATION_NOTICE))
-        finally:
-            # Drop the spinner from the final, frozen frame (success or error).
-            working = False
-            live.update(render())
+        if seg_text:
+            produced_text = True
 
-    return "".join(answer_parts)
+        # Record the assistant turn (full content) for history + continuation.
+        if final.content:
+            messages.append({"role": "assistant", "content": final.content})
+
+        # Every tool_use block needs a matching tool_result, regardless of
+        # stop_reason: a tool_use can also surface under e.g. max_tokens (the
+        # model cut off mid-call), and committing it without a result would make
+        # the API reject every following request. Drive off block presence, not
+        # stop_reason.
+        tool_use_blocks = [
+            b for b in final.content if getattr(b, "type", None) == "tool_use"
+        ]
+        if tool_use_blocks:
+            tool_results = []
+            for block in tool_use_blocks:
+                if block.name == "send_email":
+                    sent_email = True
+                    inp = block.input if isinstance(block.input, dict) else {}
+                    result = _handle_send_email(console, inp)
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                    )
+                else:
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Error: unknown tool '{block.name}'.",
+                            "is_error": True,
+                        }
+                    )
+            messages.append({"role": "user", "content": tool_results})
+            continue
+
+        if final.stop_reason == "pause_turn":
+            continue  # server tool paused mid-run; re-send to resume
+
+        break
+    else:
+        console.print(Text(AGENT_STEP_LIMIT_NOTICE))
+        # End history on an assistant turn so the next question alternates cleanly
+        # (the loop may have just appended a dangling tool_result user turn).
+        messages.append({"role": "assistant", "content": AGENT_STEP_LIMIT_NOTICE})
+
+    return produced_text or sent_email
 
 
 def main() -> None:
@@ -193,28 +259,25 @@ def main() -> None:
 
         print()  # blank line between the user's question and the agent's output
 
-        # Work on a copy so a server-tool `pause_turn` (which appends partial
-        # assistant blocks) doesn't leak into the durable text history.
+        # Work on a copy so a failed turn (exception) doesn't leave a partial
+        # exchange in the durable history.
         working = messages + [{"role": "user", "content": question}]
 
         try:
-            answer = stream_turn(client, working, console)
+            produced = stream_turn(client, working, console)
         except anthropic.APIError as exc:
             print(f"\n[API error: {exc}]")
             continue  # history untouched; drop this turn
         except KeyboardInterrupt:
             print("\n[interrupted]")
             continue  # abort this turn; history untouched
-        if not answer:
-            # No text came back (empty refusal, hit max_tokens before any text,
-            # etc.). Appending an empty assistant turn would make the API reject
-            # every following request, so drop this turn instead.
-            print("[no response]")
-            continue
 
+        if not produced:
+            print("[no response]")
+            continue  # nothing produced; don't commit a dangling turn
+
+        messages[:] = working  # commit the full exchange (incl. emails) to history
         print()  # blank line before the next prompt
-        messages.append({"role": "user", "content": question})
-        messages.append({"role": "assistant", "content": answer})
 
 
 if __name__ == "__main__":
