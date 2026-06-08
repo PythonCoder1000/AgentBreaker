@@ -28,6 +28,8 @@ from settings import (
     AGENT_PREFIX,
     AGENT_STEP_LIMIT_NOTICE,
     CLIENT_PREFIX,
+    CONTACTS,
+    CONTACTS_DIRECTORY_HEADER,
     EMAIL_BULLET,
     EMAIL_LABEL,
     LIVE_REFRESH_PER_SECOND,
@@ -61,6 +63,17 @@ def _sanitize_block(text: str) -> str:
     and email structure still render.
     """
     return _MD_CONTROL_CHARS.sub("", text)
+
+
+def _build_system_prompt() -> str:
+    """Append the contact directory (rendered from CONTACTS) to the system prompt."""
+    lines = [CONTACTS_DIRECTORY_HEADER]
+    for contact in CONTACTS:
+        name = contact.get("name", "Unknown")
+        email = contact.get("email", "no email on file")
+        phone = contact.get("phone", "no phone on file")
+        lines.append(f"- {name} <{email}> — {phone}")
+    return f"{SYSTEM_PROMPT}\n\n" + "\n".join(lines)
 
 
 def _tool_line(query: str) -> Text:
@@ -105,7 +118,10 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
 
 
 def stream_turn(
-    client: anthropic.Anthropic, messages: list[dict], console: Console
+    client: anthropic.Anthropic,
+    messages: list[dict],
+    console: Console,
+    system: str,
 ) -> bool:
     """Run one agentic turn, mutating `messages` with the full exchange.
 
@@ -146,7 +162,7 @@ def stream_turn(
                 with client.messages.stream(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
+                    system=system,
                     tools=TOOLS,
                     messages=messages,
                 ) as stream:
@@ -241,6 +257,7 @@ def main() -> None:
 
     client = anthropic.Anthropic(api_key=api_key)
     console = Console()
+    system = _build_system_prompt()
     messages: list[dict] = []
 
     print(f"AgentBreaker chat ({MODEL}). Type 'exit' to quit.\n")
@@ -264,7 +281,7 @@ def main() -> None:
         working = messages + [{"role": "user", "content": question}]
 
         try:
-            produced = stream_turn(client, working, console)
+            produced = stream_turn(client, working, console, system)
         except anthropic.APIError as exc:
             print(f"\n[API error: {exc}]")
             continue  # history untouched; drop this turn
