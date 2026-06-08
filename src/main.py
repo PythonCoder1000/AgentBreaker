@@ -20,6 +20,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:  # readline (stdlib) gives input() arrow-key line editing & history
+    import readline  # noqa: F401
+except ImportError:  # pragma: no cover — present on macOS/Linux CPython
+    pass
+
 import anthropic
 from dotenv import load_dotenv
 from rich.console import Console, Group
@@ -76,11 +81,26 @@ TESTING_ENV = (PROJECT_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")  # all C0 controls (incl. ESC) + DEL
 _MD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # same, but keeps \t and \n
+# Terminal escape sequences for special keys: CSI (\x1b[…, normal-mode arrows) and
+# SS3 (\x1bO…, application-cursor-mode arrows). Both classes are linear (no backtracking).
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O[@-~])")
 
 
 def _sanitize(text: str) -> str:
     """Strip control bytes so untrusted single-line text can't drive the terminal."""
     return _CONTROL_CHARS.sub("", text)
+
+
+def _clean_user_input(text: str) -> str:
+    """Strip ANSI escape sequences and control bytes from a typed line.
+
+    Without readline (e.g. when stdin isn't a fully cooked TTY), arrow keys and
+    other special keys arrive as raw escape sequences like '\\x1b[A'. Removing the
+    whole CSI sequence first (then any stray control bytes) keeps stray keypresses
+    from reaching the model and, crucially, from breaking the exit/quit check —
+    a polluted '\\x1b[Bexit' would otherwise never match 'exit'.
+    """
+    return _sanitize(_ANSI_ESCAPE.sub("", text))
 
 
 def _sanitize_block(text: str) -> str:
@@ -282,7 +302,7 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
         )
     )
     try:
-        reply = input(CLIENT_PREFIX).strip()
+        reply = _clean_user_input(input(CLIENT_PREFIX)).strip()
     except EOFError:
         reply = ""
     print()
@@ -457,7 +477,7 @@ def main() -> None:
 
     while True:
         try:
-            question = input(USER_PREFIX).strip()
+            question = _clean_user_input(input(USER_PREFIX)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
