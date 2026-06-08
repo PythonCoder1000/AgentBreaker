@@ -13,6 +13,7 @@ Type 'exit' or 'quit' (or press Ctrl-C / Ctrl-D) to leave.
 
 import os
 import re
+import secrets
 import sys
 
 import anthropic
@@ -31,7 +32,10 @@ from settings import (
     CONTACTS,
     CONTACTS_DIRECTORY_HEADER,
     EMAIL_BULLET,
+    EMAIL_FENCE_NONCE_BYTES,
     EMAIL_LABEL,
+    EMAIL_NO_REPLY_TEMPLATE,
+    EMAIL_REPLY_TEMPLATE,
     LIVE_REFRESH_PER_SECOND,
     MAX_AGENT_STEPS,
     MAX_TOKENS,
@@ -113,8 +117,12 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     print()
 
     if not reply:
-        return f"Email delivered to {email}. No reply has been received yet."
-    return f"{email} replied:\n\n{reply}"
+        return EMAIL_NO_REPLY_TEMPLATE.format(email=email)
+    # Strip control bytes (incl. newlines) so the single-line reply can't forge
+    # the closing marker or smuggle a fake [SYSTEM] line onto its own line. The
+    # nonce makes the marker itself unguessable, so it can't be forged inline.
+    nonce = secrets.token_hex(EMAIL_FENCE_NONCE_BYTES)
+    return EMAIL_REPLY_TEMPLATE.format(email=email, reply=_sanitize(reply), nonce=nonce)
 
 
 def stream_turn(
