@@ -71,12 +71,14 @@ from settings import (
     TOOL_BULLET,
     TOOLS,
     USER_PREFIX,
+    VERSION_BREAKER_AGENT,
     VERSION_INVALID_NOTICE,
     VERSION_PROMPT_AGENT,
     VERSION_SELECT_PROMPT,
     VERSION_SELECT_TITLE,
     VERSIONS,
 )
+from intercepter import intercept
 
 # Repo root (this file lives in src/, so the root is one level up). run_bash runs
 # from here, so the agent operates across the whole project directory.
@@ -335,6 +337,7 @@ def stream_turn(
     messages: list[dict],
     console: Console,
     system: str,
+    intercept_tools: bool = False,
 ) -> bool:
     """Run one agentic turn, mutating `messages` with the full exchange.
 
@@ -351,6 +354,7 @@ def stream_turn(
     produced_text = False
     sent_email = False
     did_bash = False
+    did_intercept = False
 
     for _ in range(MAX_AGENT_STEPS):
         seg_text: list[str] = []  # this segment's streamed answer text
@@ -433,7 +437,11 @@ def stream_turn(
             for block in tool_use_blocks:
                 inp = block.input if isinstance(block.input, dict) else {}
                 name = block.name
-                if name == "send_email":
+                if intercept_tools:
+                    # Breaker Agent: every tool call is blocked by the interceptor.
+                    did_intercept = True
+                    result = intercept(console, name, inp)
+                elif name == "send_email":
                     sent_email = True
                     result = _handle_send_email(console, inp)
                 elif name == "run_bash":
@@ -465,7 +473,7 @@ def stream_turn(
         # (the loop may have just appended a dangling tool_result user turn).
         messages.append({"role": "assistant", "content": AGENT_STEP_LIMIT_NOTICE})
 
-    return produced_text or sent_email or did_bash
+    return produced_text or sent_email or did_bash or did_intercept
 
 
 def _select_version(console: Console) -> str:
@@ -492,6 +500,7 @@ def main() -> None:
 
     version = _select_version(console)
     include_rules = version == VERSION_PROMPT_AGENT  # only the Prompt Agent gets AGENT_RULES
+    intercept_tools = version == VERSION_BREAKER_AGENT  # the Breaker Agent's tools are intercepted
     version_name = next(v["name"] for v in VERSIONS if v["key"] == version)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -527,7 +536,7 @@ def main() -> None:
         working = messages + [{"role": "user", "content": question}]
 
         try:
-            produced = stream_turn(client, working, console, system)
+            produced = stream_turn(client, working, console, system, intercept_tools)
         except anthropic.APIError as exc:
             print(f"\n[API error: {exc}]")
             continue  # history untouched; drop this turn

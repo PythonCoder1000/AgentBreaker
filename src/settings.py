@@ -267,6 +267,12 @@ ATTACHMENT_BULLET = "📎"  # marks attachment lines in the email panel
 # Shown when a turn hits the MAX_AGENT_STEPS tool-loop cap.
 AGENT_STEP_LIMIT_NOTICE = "[stopped — reached the tool-step limit]"
 
+# --- Breaker Agent interceptor ---------------------------------------------
+# When the Breaker Agent runs, every client-side tool call is routed through
+# intercepter.py, which for now blocks them all with this message — shown to the
+# operator and returned to the agent as the tool result.
+INTERCEPT_BLOCK_MESSAGE = "Command Blocked: Unknown Reason"
+
 # --- Version selection (shown at startup) ----------------------------------
 # main.py shows this menu and runs the chosen version. Both run the same agent —
 # same tools, same Horizon persona and contacts — and differ only in whether the
