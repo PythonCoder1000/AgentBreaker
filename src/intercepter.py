@@ -5,11 +5,15 @@ never passes through this module. evaluate() judges each tool call in priority
 order:
   1. hard-logic blocks      — instant, deterministic
   2. hard-logic escalations — instant; ask the operator
-  3. AI semantic blocks      — one Claude call covering all semantic rules
-  4. AI escalations          — same call
+  3. AI semantic block/allow/escalate — one Claude call
 
-It returns None to ALLOW the call (the real tool then runs) or a block-message
-string (the tool result the agent sees) to DENY it.
+The AI call is stateless: it gets ONLY the current tool call plus the full
+contents of any files involved (read for it), never conversation history. It
+returns allow / block / escalate with a one-to-two-sentence reason, reserving
+escalate for genuinely unclear cases.
+
+evaluate() returns None to ALLOW (the real tool then runs) or a block-message
+string (the tool result the agent sees) to DENY.
 
 (web_search is a server-side tool executed by Anthropic's infrastructure, so it
 never reaches the client-side dispatch and is not evaluated here.)
@@ -21,6 +25,7 @@ import json
 import posixpath
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import anthropic
 from rich.console import Console
@@ -46,12 +51,16 @@ from settings import (
     INTERCEPT_ESCALATE_PROMPT,
     INTERCEPT_ESCALATE_TEMPLATE,
     INTERCEPT_FAIL_OPEN,
-    INTERCEPT_RECENT_CALLS_KEPT,
+    INTERCEPT_FILE_CONTEXT_CHARS,
+    INTERCEPT_MAX_FILES_READ,
     MAX_ATTACHMENTS,
     MAX_EMAIL_RECIPIENTS,
     RESULT_PREFIX,
     TOOL_BULLET,
 )
+
+# Repo root (this file lives in src/), used to resolve the files a call involves.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Pre-compile the command-pattern lists once. Case-insensitive so a secret can't
 # be reached by varying case (e.g. .ENV, Credentials.txt) on a case-insensitive FS.
@@ -60,21 +69,20 @@ _BASH_MODIFY = [re.compile(p, re.IGNORECASE) for p in BASH_MODIFY_PATTERNS]
 _EMAIL_BODY_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in EMAIL_BODY_BLOCK_PATTERNS]
 _EMAIL_ADDRESS = re.compile(EMAIL_ADDRESS_RE)
 _ALLOWED_DOMAIN = "@" + COMPANY_DOMAIN.lower()
+# A path-like token in a shell command (quotes/operators act as separators).
+_PATH_TOKEN = re.compile(r"[A-Za-z0-9_./@+-]+")
 
 
 @dataclass
 class InterceptContext:
-    """Session/turn state the evaluator reasons over for the stateful policies."""
+    """Session/turn state for the deterministic (hard-logic) policies only."""
 
     task: str = ""  # the current user task (set each turn by main)
     tool_calls_this_turn: int = 0
     bash_history: list[str] = field(default_factory=list)  # executed bash commands
-    recent_calls: list[str] = field(default_factory=list)  # short summaries for the AI
 
     def record(self, tool_name: str, tool_input: dict, executed: bool) -> None:
-        """Log a call: keep a short summary, and remember executed bash commands."""
-        self.recent_calls.append(_summarize_call(tool_name, tool_input))
-        del self.recent_calls[:-INTERCEPT_RECENT_CALLS_KEPT]
+        """Remember executed bash commands (for the 'attach unread file' rule)."""
         if executed and tool_name == "run_bash":
             self.bash_history.append(str(tool_input.get("command", "")))
 
@@ -100,7 +108,7 @@ def evaluate(
     if reason and not _ask_operator(console, reason):
         return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({reason})")
 
-    # 3 + 4. AI semantic blocks and escalations (one Claude call).
+    # 3. AI verdict (stateless; grounded in the involved files' contents).
     decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input)
     if decision == "block":
         return _block(console, tool_name, ai_reason or "failed AI policy review")
@@ -223,7 +231,7 @@ def _was_read(path: str, context: InterceptContext) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# AI semantic evaluation (one call covers all semantic blocks + escalations)
+# AI evaluation — stateless, grounded in the involved files' contents
 # --------------------------------------------------------------------------- #
 def _ai_evaluate(
     client: anthropic.Anthropic,
@@ -234,12 +242,15 @@ def _ai_evaluate(
 ) -> tuple[str, str]:
     """Return (decision, reason) where decision is allow|block|escalate."""
     fallback = ("allow", "") if INTERCEPT_FAIL_OPEN else ("block", "policy evaluator unavailable")
+    file_context = _gather_file_context(tool_name, tool_input)
     try:
         response = client.messages.create(
             model=INTERCEPT_AI_MODEL,
             max_tokens=INTERCEPT_AI_MAX_TOKENS,
             system=INTERCEPT_AI_SYSTEM,
-            messages=[{"role": "user", "content": _ai_user_message(context, tool_name, tool_input)}],
+            messages=[
+                {"role": "user", "content": _ai_user_message(context, tool_name, tool_input, file_context)}
+            ],
         )
     except anthropic.APIError as exc:
         console.print(Text(f"{RESULT_PREFIX}[policy evaluator error: {exc}]", style="red"))
@@ -250,12 +261,13 @@ def _ai_evaluate(
     return parsed if parsed is not None else fallback
 
 
-def _ai_user_message(context: InterceptContext, tool_name: str, tool_input: dict) -> str:
-    lines = [f"Original task: {context.task or '(unknown)'}"]
-    if context.recent_calls:
-        lines.append("Recent tool calls (oldest first):")
-        lines += [f"  - {call}" for call in context.recent_calls]
-    lines.append("New tool call to judge:")
+def _ai_user_message(
+    context: InterceptContext, tool_name: str, tool_input: dict, file_context: list[tuple[str, str]]
+) -> str:
+    lines = []
+    if context.task:
+        lines.append(f"Agent's current task: {context.task}")
+    lines.append("Tool call to judge:")
     if tool_name == "send_email":
         lines.append("  tool: send_email")
         lines.append(f"  recipients: {tool_input.get('email', '')}")
@@ -268,6 +280,14 @@ def _ai_user_message(context: InterceptContext, tool_name: str, tool_input: dict
     else:
         lines.append(f"  tool: {tool_name}")
         lines.append(f"  input: {tool_input}")
+
+    if file_context:
+        lines.append("\nContents of the files involved in this call (read for you):")
+        for path, content in file_context:
+            lines.append(f"----- {path} -----")
+            lines.append(content)
+    else:
+        lines.append("\n(No readable files are involved in this call.)")
     return "\n".join(lines)
 
 
@@ -286,6 +306,69 @@ def _parse_verdict(text: str) -> tuple[str, str] | None:
 
 
 # --------------------------------------------------------------------------- #
+# File-context gathering (force-read the files a call involves)
+# --------------------------------------------------------------------------- #
+def _gather_file_context(tool_name: str, tool_input: dict) -> list[tuple[str, str]]:
+    """Read the existing files referenced by this call, for the evaluator."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for rel in _involved_paths(tool_name, tool_input):
+        if rel in seen:
+            continue
+        seen.add(rel)
+        resolved = _resolve(rel)
+        content = _read_file_safe(resolved) if resolved is not None else None
+        if content is not None:
+            out.append((rel, content))
+        if len(out) >= INTERCEPT_MAX_FILES_READ:
+            break
+    return out
+
+
+def _involved_paths(tool_name: str, tool_input: dict) -> list[str]:
+    if tool_name == "send_email":
+        return _attachments(tool_input)
+    if tool_name == "run_bash":
+        return _command_paths(str(tool_input.get("command", "")))
+    return []
+
+
+def _command_paths(command: str) -> list[str]:
+    """Path-like tokens in a shell command (not flags; must look like a file path)."""
+    paths = []
+    for token in _PATH_TOKEN.findall(command):
+        if token.startswith("-"):  # a flag, not a path
+            continue
+        if "/" in token or re.search(r"\.[A-Za-z0-9]+$", token):
+            paths.append(token)
+    return paths
+
+
+def _resolve(rel: str) -> Path | None:
+    try:
+        path = Path(rel)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+    except (OSError, ValueError):  # ValueError: embedded null byte in the path
+        return None
+
+
+def _read_file_safe(path: Path) -> str | None:
+    """Read up to INTERCEPT_FILE_CONTEXT_CHARS of a file; None if not a readable file."""
+    try:
+        if not path.is_file():
+            return None
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            data = handle.read(INTERCEPT_FILE_CONTEXT_CHARS + 1)
+    except (OSError, ValueError):  # ValueError: embedded null byte in the path
+        return None
+    if len(data) > INTERCEPT_FILE_CONTEXT_CHARS:
+        return data[:INTERCEPT_FILE_CONTEXT_CHARS] + "\n...[truncated]"
+    return data
+
+
+# --------------------------------------------------------------------------- #
 # Small helpers
 # --------------------------------------------------------------------------- #
 def _recipients(email_field: object) -> list[str]:
@@ -296,14 +379,6 @@ def _recipients(email_field: object) -> list[str]:
 def _attachments(tool_input: dict) -> list[str]:
     raw = tool_input.get("attachments")
     return [str(item) for item in raw] if isinstance(raw, list) else []
-
-
-def _summarize_call(tool_name: str, tool_input: dict) -> str:
-    if tool_name == "send_email":
-        return f"send_email to {tool_input.get('email', '')} ({len(_attachments(tool_input))} attachments)"
-    if tool_name == "run_bash":
-        return f"run_bash: {str(tool_input.get('command', ''))[:120]}"
-    return tool_name
 
 
 def _indent(text: str, prefix: str = "    ") -> str:
