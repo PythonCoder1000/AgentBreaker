@@ -62,7 +62,6 @@ from settings import (
     MAX_AGENT_STEPS,
     MAX_TOKENS,
     MODEL,
-    NOT_IMPLEMENTED_NOTICE,
     RESULT_PREFIX,
     SEARCHING_LABEL,
     SPINNER_STYLE,
@@ -73,9 +72,9 @@ from settings import (
     TOOLS,
     USER_PREFIX,
     VERSION_INVALID_NOTICE,
+    VERSION_PROMPT_AGENT,
     VERSION_SELECT_PROMPT,
     VERSION_SELECT_TITLE,
-    VERSION_UNRESTRICTED,
     VERSIONS,
 )
 
@@ -119,11 +118,14 @@ def _sanitize_block(text: str) -> str:
     return _MD_CONTROL_CHARS.sub("", text)
 
 
-def _build_system_prompt() -> str:
-    """Assemble the full prompt: persona + contact directory + operating rules.
+def _build_system_prompt(include_rules: bool) -> str:
+    """Assemble the prompt: persona + contact directory, plus AGENT_RULES when
+    include_rules is True.
 
-    AGENT_RULES is kept separate in settings and concatenated here, so the
-    guardrails can be tuned without touching the base persona.
+    The Prompt Agent gets the operating rules (guardrails); the Breaker Agent
+    omits them but keeps the identical persona and contacts — so it still
+    believes Horizon is a real company with real people, just without the
+    initializing rules the Prompt Agent receives.
     """
     lines = [CONTACTS_DIRECTORY_HEADER]
     for contact in CONTACTS:
@@ -133,7 +135,10 @@ def _build_system_prompt() -> str:
         phone = contact.get("phone", "no phone on file")
         lines.append(f"- {name} ({role}) <{email}> — {phone}")
     directory = "\n".join(lines)
-    return f"{SYSTEM_PROMPT}\n\n{directory}\n\n{AGENT_RULES}"
+    prompt = f"{SYSTEM_PROMPT}\n\n{directory}"
+    if include_rules:
+        prompt += f"\n\n{AGENT_RULES}"
+    return prompt
 
 
 def _tool_line(query: str) -> Text:
@@ -486,9 +491,8 @@ def main() -> None:
     console = Console()
 
     version = _select_version(console)
-    if version != VERSION_UNRESTRICTED:
-        console.print(Text(NOT_IMPLEMENTED_NOTICE, style="bold yellow"))
-        return
+    include_rules = version == VERSION_PROMPT_AGENT  # only the Prompt Agent gets AGENT_RULES
+    version_name = next(v["name"] for v in VERSIONS if v["key"] == version)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -499,10 +503,10 @@ def main() -> None:
 
     client = anthropic.Anthropic(api_key=api_key)
     TESTING_ENV.mkdir(parents=True, exist_ok=True)  # ensure the scenario folder exists
-    system = _build_system_prompt()
+    system = _build_system_prompt(include_rules=include_rules)
     messages: list[dict] = []
 
-    print(f"AgentBreaker chat ({MODEL}). Type 'exit' to quit.\n")
+    print(f"AgentBreaker — {version_name} ({MODEL}). Type 'exit' to quit.\n")
 
     while True:
         try:

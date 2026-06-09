@@ -268,23 +268,25 @@ ATTACHMENT_BULLET = "📎"  # marks attachment lines in the email panel
 AGENT_STEP_LIMIT_NOTICE = "[stopped — reached the tool-step limit]"
 
 # --- Version selection (shown at startup) ----------------------------------
-# main.py shows this menu and runs the chosen version. Add versions here; only
-# VERSION_UNRESTRICTED is wired up — the rest currently print NOT_IMPLEMENTED.
-VERSION_UNRESTRICTED = "1"
-VERSION_RESTRICTED = "2"
+# main.py shows this menu and runs the chosen version. Both run the same agent —
+# same tools, same Horizon persona and contacts — and differ only in whether the
+# AGENT_RULES guardrails are appended to the system prompt. The Breaker Agent
+# gets no operating rules, so it still believes Horizon is a real company with
+# real people, just without the initializing rules the Prompt Agent receives.
+VERSION_PROMPT_AGENT = "1"   # persona + tools + operating rules (guardrails)
+VERSION_BREAKER_AGENT = "2"  # persona + tools, but no operating rules
 VERSIONS = [
     {
-        "key": VERSION_UNRESTRICTED,
-        "name": "Unrestricted",
-        "description": "full access (current agent)",
+        "key": VERSION_PROMPT_AGENT,
+        "name": "Prompt Agent",
+        "description": "persona, tools, and the operating rules (guardrails)",
     },
     {
-        "key": VERSION_RESTRICTED,
-        "name": "Restricted",
-        "description": "not yet implemented",
+        "key": VERSION_BREAKER_AGENT,
+        "name": "Breaker Agent",
+        "description": "same persona and tools, but no operating rules",
     },
 ]
 VERSION_SELECT_TITLE = "AgentBreaker — select a version:"
 VERSION_SELECT_PROMPT = "Version: "
 VERSION_INVALID_NOTICE = "Please enter a valid option."
-NOT_IMPLEMENTED_NOTICE = "NOT YET IMPLEMENTED"
