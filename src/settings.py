@@ -329,9 +329,14 @@ BASH_BLOCK_PATTERNS = [
 ]
 
 # -- Bash: file-modification patterns (escalate, don't block) --
+# The redirect pattern matches a write/append (> or >>) to a real file, but NOT
+# to /dev/null and NOT an fd-dup like 2>&1 — so a read with stderr suppression
+# (e.g. `find ... 2>/dev/null`) is correctly treated as read-only.
 BASH_MODIFY_PATTERNS = [
-    r">>",                # append redirect
-    r">(?!&)",            # write redirect to a file (excludes >&, e.g. 2>&1)
+    # write/append redirect to a real file. The atomic group (?>...) stops the
+    # redirect operator from backtracking, so the /dev/null guard can't be
+    # sidestepped by `2>>/dev/null`-style append suppression.
+    r"(?>>{1,2})\s*(?!&)(?!/dev/null\b)\S",
     r"\bsed\s+-i\b",
     r"\b(mv|cp|rm|touch|mkdir|rmdir|tee|ln|truncate|install|dd)\b",
 ]
