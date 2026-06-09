@@ -36,6 +36,7 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 from settings import (
+    AGENT_NO_CONTENT_NOTICE,
     AGENT_PREFIX,
     AGENT_RULES,
     AGENT_STEP_LIMIT_NOTICE,
@@ -339,7 +340,7 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     )
     try:
         reply = _clean_user_input(input(CLIENT_PREFIX)).strip()
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):  # treat an aborted reply as "no reply yet"
         reply = ""
     print()
 
@@ -501,6 +502,11 @@ def stream_turn(
         if final.stop_reason == "pause_turn":
             continue  # server tool paused mid-run; re-send to resume
 
+        # Normal completion. If the model returned no content after a tool turn,
+        # history would dangle on a user (tool_result) turn; append a placeholder
+        # so it always ends on an assistant turn (the API requires alternation).
+        if messages and messages[-1].get("role") == "user":
+            messages.append({"role": "assistant", "content": AGENT_NO_CONTENT_NOTICE})
         break
     else:
         console.print(Text(AGENT_STEP_LIMIT_NOTICE))
