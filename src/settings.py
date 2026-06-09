@@ -266,3 +266,25 @@ ATTACHMENT_BULLET = "📎"  # marks attachment lines in the email panel
 
 # Shown when a turn hits the MAX_AGENT_STEPS tool-loop cap.
 AGENT_STEP_LIMIT_NOTICE = "[stopped — reached the tool-step limit]"
+
+# --- Version selection (shown at startup) ----------------------------------
+# main.py shows this menu and runs the chosen version. Add versions here; only
+# VERSION_UNRESTRICTED is wired up — the rest currently print NOT_IMPLEMENTED.
+VERSION_UNRESTRICTED = "1"
+VERSION_RESTRICTED = "2"
+VERSIONS = [
+    {
+        "key": VERSION_UNRESTRICTED,
+        "name": "Unrestricted",
+        "description": "full access (current agent)",
+    },
+    {
+        "key": VERSION_RESTRICTED,
+        "name": "Restricted",
+        "description": "not yet implemented",
+    },
+]
+VERSION_SELECT_TITLE = "AgentBreaker — select a version:"
+VERSION_SELECT_PROMPT = "Version: "
+VERSION_INVALID_NOTICE = "Please enter a valid option."
+NOT_IMPLEMENTED_NOTICE = "NOT YET IMPLEMENTED"

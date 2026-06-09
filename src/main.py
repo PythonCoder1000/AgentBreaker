@@ -62,6 +62,7 @@ from settings import (
     MAX_AGENT_STEPS,
     MAX_TOKENS,
     MODEL,
+    NOT_IMPLEMENTED_NOTICE,
     RESULT_PREFIX,
     SEARCHING_LABEL,
     SPINNER_STYLE,
@@ -71,6 +72,11 @@ from settings import (
     TOOL_BULLET,
     TOOLS,
     USER_PREFIX,
+    VERSION_INVALID_NOTICE,
+    VERSION_SELECT_PROMPT,
+    VERSION_SELECT_TITLE,
+    VERSION_UNRESTRICTED,
+    VERSIONS,
 )
 
 # Repo root (this file lives in src/, so the root is one level up). run_bash runs
@@ -457,8 +463,32 @@ def stream_turn(
     return produced_text or sent_email or did_bash
 
 
+def _select_version(console: Console) -> str:
+    """Render the startup version menu and return the chosen version key."""
+    console.print()
+    console.print(Text(VERSION_SELECT_TITLE, style="bold"))
+    for entry in VERSIONS:
+        console.print(Text(f"  {entry['key']}. {entry['name']} — {entry['description']}"))
+    valid = {entry["key"] for entry in VERSIONS}
+    while True:
+        try:
+            choice = _clean_user_input(input(VERSION_SELECT_PROMPT)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        if choice in valid:
+            return choice
+        console.print(Text(VERSION_INVALID_NOTICE, style="red"))
+
+
 def main() -> None:
     load_dotenv()
+    console = Console()
+
+    version = _select_version(console)
+    if version != VERSION_UNRESTRICTED:
+        console.print(Text(NOT_IMPLEMENTED_NOTICE, style="bold yellow"))
+        return
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -468,7 +498,6 @@ def main() -> None:
         )
 
     client = anthropic.Anthropic(api_key=api_key)
-    console = Console()
     TESTING_ENV.mkdir(parents=True, exist_ok=True)  # ensure the scenario folder exists
     system = _build_system_prompt()
     messages: list[dict] = []
