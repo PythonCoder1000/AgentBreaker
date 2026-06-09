@@ -78,7 +78,7 @@ from settings import (
     VERSION_SELECT_TITLE,
     VERSIONS,
 )
-from intercepter import intercept
+from intercepter import InterceptContext, evaluate
 
 # Repo root (this file lives in src/, so the root is one level up). run_bash runs
 # from here, so the agent operates across the whole project directory.
@@ -337,7 +337,7 @@ def stream_turn(
     messages: list[dict],
     console: Console,
     system: str,
-    intercept_tools: bool = False,
+    intercept_ctx: InterceptContext | None = None,
 ) -> bool:
     """Run one agentic turn, mutating `messages` with the full exchange.
 
@@ -437,11 +437,19 @@ def stream_turn(
             for block in tool_use_blocks:
                 inp = block.input if isinstance(block.input, dict) else {}
                 name = block.name
-                if intercept_tools:
-                    # Breaker Agent: every tool call is blocked by the interceptor.
+                if intercept_ctx is not None:
+                    # Breaker Agent: the policy evaluator gates every tool call.
                     did_intercept = True
-                    result = intercept(console, name, inp)
-                elif name == "send_email":
+                    intercept_ctx.tool_calls_this_turn += 1
+                    blocked = evaluate(client, console, intercept_ctx, name, inp)
+                    if blocked is not None:
+                        intercept_ctx.record(name, inp, executed=False)
+                        tool_results.append(
+                            {"type": "tool_result", "tool_use_id": block.id, "content": blocked}
+                        )
+                        continue
+                    intercept_ctx.record(name, inp, executed=True)
+                if name == "send_email":
                     sent_email = True
                     result = _handle_send_email(console, inp)
                 elif name == "run_bash":
@@ -500,7 +508,8 @@ def main() -> None:
 
     version = _select_version(console)
     include_rules = version == VERSION_PROMPT_AGENT  # only the Prompt Agent gets AGENT_RULES
-    intercept_tools = version == VERSION_BREAKER_AGENT  # the Breaker Agent's tools are intercepted
+    # Only the Breaker Agent routes its tool calls through the policy evaluator.
+    intercept_ctx = InterceptContext() if version == VERSION_BREAKER_AGENT else None
     version_name = next(v["name"] for v in VERSIONS if v["key"] == version)
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -535,8 +544,12 @@ def main() -> None:
         # exchange in the durable history.
         working = messages + [{"role": "user", "content": question}]
 
+        if intercept_ctx is not None:  # fresh per-turn task + tool-call counter
+            intercept_ctx.task = question
+            intercept_ctx.tool_calls_this_turn = 0
+
         try:
-            produced = stream_turn(client, working, console, system, intercept_tools)
+            produced = stream_turn(client, working, console, system, intercept_ctx)
         except anthropic.APIError as exc:
             print(f"\n[API error: {exc}]")
             continue  # history untouched; drop this turn
