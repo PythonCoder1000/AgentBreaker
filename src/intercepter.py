@@ -8,12 +8,18 @@ order:
   3. AI semantic block/allow/escalate — one Claude call
 
 The AI call is stateless: it gets ONLY the current tool call plus the full
-contents of any files involved (read for it), never conversation history. It
-returns allow / block / escalate with a one-to-two-sentence reason, reserving
-escalate for genuinely unclear cases.
+contents of any files involved, never conversation history. It returns allow /
+block / escalate with a one-to-two-sentence reason, reserving escalate for
+genuinely unclear cases.
 
-evaluate() returns None to ALLOW (the real tool then runs) or a block-message
-string (the tool result the agent sees) to DENY.
+The files involved are loaded by the context module (context.py), not by the
+agent. evaluate() asks it to load them — only after the deterministic block /
+escalation tiers pass, so a hard-blocked call never touches disk — judges on
+them, then hands the same loaded context back so main can give it to the agent.
+
+evaluate() returns (block_message, file_context): block_message is None to ALLOW
+(the real tool then runs) or the tool-result string the agent sees to DENY; on an
+allow, file_context is the (path, content) list to append to the agent's result.
 
 (web_search is a server-side tool executed by Anthropic's infrastructure, so it
 never reaches the client-side dispatch and is not evaluated here.)
@@ -25,7 +31,6 @@ import json
 import posixpath
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 import anthropic
 from rich.console import Console
@@ -34,6 +39,7 @@ from rich.padding import Padding
 from rich.spinner import Spinner
 from rich.text import Text
 
+from context import attachments, gather_file_context
 from settings import (
     ATTACHMENT_BLOCKED_BASENAMES,
     ATTACHMENT_BLOCKED_COMPONENTS,
@@ -54,8 +60,6 @@ from settings import (
     INTERCEPT_ESCALATE_PROMPT,
     INTERCEPT_ESCALATE_TEMPLATE,
     INTERCEPT_FAIL_OPEN,
-    INTERCEPT_FILE_CONTEXT_CHARS,
-    INTERCEPT_MAX_FILES_READ,
     INTERCEPT_REVIEW_LABEL,
     LIVE_REFRESH_PER_SECOND,
     MAX_ATTACHMENTS,
@@ -65,9 +69,6 @@ from settings import (
     TOOL_BULLET,
 )
 
-# Repo root (this file lives in src/), used to resolve the files a call involves.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
 # Pre-compile the command-pattern lists once. Case-insensitive so a secret can't
 # be reached by varying case (e.g. .ENV, Credentials.txt) on a case-insensitive FS.
 _BASH_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_BLOCK_PATTERNS]
@@ -75,8 +76,6 @@ _BASH_MODIFY = [re.compile(p, re.IGNORECASE) for p in BASH_MODIFY_PATTERNS]
 _EMAIL_BODY_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in EMAIL_BODY_BLOCK_PATTERNS]
 _EMAIL_ADDRESS = re.compile(EMAIL_ADDRESS_RE)
 _ALLOWED_DOMAIN = "@" + COMPANY_DOMAIN.lower()
-# A path-like token in a shell command (quotes/operators act as separators).
-_PATH_TOKEN = re.compile(r"[A-Za-z0-9_./@+-]+")
 
 
 @dataclass
@@ -96,26 +95,34 @@ def evaluate(
     context: InterceptContext,
     tool_name: str,
     tool_input: dict,
-) -> str | None:
-    """Judge one Breaker Agent tool call. Return None to allow, else a block msg."""
-    # 1. Hard-logic blocks (instant).
+) -> tuple[str | None, list[tuple[str, str]]]:
+    """Judge one Breaker Agent tool call.
+
+    Returns (block_message, file_context). block_message is None when allowed (the
+    real tool then runs) or the tool-result string the agent sees when denied. On
+    an allow, file_context is the (path, content) list the context module loaded —
+    handed back so the agent receives the same files (main appends them).
+    """
+    # 1. Hard-logic blocks (instant; no disk I/O).
     reason = _hard_block(tool_name, tool_input)
     if reason:
-        return _block(console, tool_name, reason)
+        return _block(console, tool_name, reason), []
 
     # 2. Hard-logic escalations (instant; ask the operator).
     reason = _hard_escalation(tool_name, tool_input, context)
     if reason and not _ask_operator(console, reason):
-        return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({reason})")
+        return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({reason})"), []
 
-    # 3. AI verdict (stateless; grounded in the involved files' contents).
-    decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input)
+    # 3. Load the involved files (only now the deterministic tiers have cleared),
+    #    then judge the call on their actual contents.
+    file_context = gather_file_context(tool_name, tool_input)
+    decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input, file_context)
     if decision == "block":
-        return _block(console, tool_name, ai_reason or "failed AI policy review")
+        return _block(console, tool_name, ai_reason or "failed AI policy review"), []
     if decision == "escalate" and not _ask_operator(console, ai_reason or "flagged by AI policy"):
-        return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({ai_reason})")
+        return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({ai_reason})"), []
 
-    return None  # allowed
+    return None, file_context  # allowed — hand the loaded files back for injection
 
 
 # --------------------------------------------------------------------------- #
@@ -165,10 +172,10 @@ def _email_hard_block(tool_input: dict) -> str | None:
         if not addr.lower().endswith(_ALLOWED_DOMAIN):
             return f"recipient outside @{COMPANY_DOMAIN}: {addr}"
 
-    attachments = _attachments(tool_input)
-    if len(attachments) > MAX_ATTACHMENTS:
+    attached = attachments(tool_input)
+    if len(attached) > MAX_ATTACHMENTS:
         return f"more than {MAX_ATTACHMENTS} attachments"
-    for path in attachments:
+    for path in attached:
         reason = _attachment_blocked(path)
         if reason:
             return reason
@@ -233,10 +240,10 @@ def _ai_evaluate(
     context: InterceptContext,
     tool_name: str,
     tool_input: dict,
+    file_context: list[tuple[str, str]],
 ) -> tuple[str, str]:
     """Return (decision, reason) where decision is allow|block|escalate."""
     fallback = ("allow", "") if INTERCEPT_FAIL_OPEN else ("block", "policy evaluator unavailable")
-    file_context = _gather_file_context(tool_name, tool_input)
     # Animate the review: a transient spinner runs while the Claude call is in
     # flight, then vanishes so the verdict line prints onto a clean console.
     spinner = Spinner(SPINNER_STYLE, text=Text(INTERCEPT_REVIEW_LABEL, style="dim"))
@@ -274,7 +281,7 @@ def _ai_user_message(
     if tool_name == "send_email":
         lines.append("  tool: send_email")
         lines.append(f"  recipients: {tool_input.get('email', '')}")
-        lines.append(f"  attachments: {_attachments(tool_input)}")
+        lines.append(f"  attachments: {attachments(tool_input)}")
         lines.append("  body:")
         lines.append(_indent(str(tool_input.get("message", ""))))
     elif tool_name == "run_bash":
@@ -309,79 +316,11 @@ def _parse_verdict(text: str) -> tuple[str, str] | None:
 
 
 # --------------------------------------------------------------------------- #
-# File-context gathering (force-read the files a call involves)
-# --------------------------------------------------------------------------- #
-def _gather_file_context(tool_name: str, tool_input: dict) -> list[tuple[str, str]]:
-    """Read the existing files referenced by this call, for the evaluator."""
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for rel in _involved_paths(tool_name, tool_input):
-        if rel in seen:
-            continue
-        seen.add(rel)
-        resolved = _resolve(rel)
-        content = _read_file_safe(resolved) if resolved is not None else None
-        if content is not None:
-            out.append((rel, content))
-        if len(out) >= INTERCEPT_MAX_FILES_READ:
-            break
-    return out
-
-
-def _involved_paths(tool_name: str, tool_input: dict) -> list[str]:
-    if tool_name == "send_email":
-        return _attachments(tool_input)
-    if tool_name == "run_bash":
-        return _command_paths(str(tool_input.get("command", "")))
-    return []
-
-
-def _command_paths(command: str) -> list[str]:
-    """Path-like tokens in a shell command (not flags; must look like a file path)."""
-    paths = []
-    for token in _PATH_TOKEN.findall(command):
-        if token.startswith("-"):  # a flag, not a path
-            continue
-        if "/" in token or re.search(r"\.[A-Za-z0-9]+$", token):
-            paths.append(token)
-    return paths
-
-
-def _resolve(rel: str) -> Path | None:
-    try:
-        path = Path(rel)
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
-        return path.resolve()
-    except (OSError, ValueError):  # ValueError: embedded null byte in the path
-        return None
-
-
-def _read_file_safe(path: Path) -> str | None:
-    """Read up to INTERCEPT_FILE_CONTEXT_CHARS of a file; None if not a readable file."""
-    try:
-        if not path.is_file():
-            return None
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            data = handle.read(INTERCEPT_FILE_CONTEXT_CHARS + 1)
-    except (OSError, ValueError):  # ValueError: embedded null byte in the path
-        return None
-    if len(data) > INTERCEPT_FILE_CONTEXT_CHARS:
-        return data[:INTERCEPT_FILE_CONTEXT_CHARS] + "\n...[truncated]"
-    return data
-
-
-# --------------------------------------------------------------------------- #
 # Small helpers
 # --------------------------------------------------------------------------- #
 def _recipients(email_field: object) -> list[str]:
     """Split a recipient field into individual addresses (comma/semicolon-separated)."""
     return [addr.strip() for addr in re.split(r"[;,]", str(email_field)) if addr.strip()]
-
-
-def _attachments(tool_input: dict) -> list[str]:
-    raw = tool_input.get("attachments")
-    return [str(item) for item in raw] if isinstance(raw, list) else []
 
 
 def _indent(text: str, prefix: str = "    ") -> str:

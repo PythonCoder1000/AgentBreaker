@@ -290,6 +290,12 @@ INTERCEPT_FAIL_OPEN = True
 INTERCEPT_FILE_CONTEXT_CHARS = 4000  # per-file truncation in the evaluator prompt
 INTERCEPT_MAX_FILES_READ = 5         # max files read for a single tool call
 
+# The context provider (context.py) loads the files a Breaker Agent call involves
+# and appends them to the tool result, so the agent receives what it touched. This
+# is how that block is framed for the agent.
+AGENT_CONTEXT_HEADER = "\n\n[CONTEXT] Files involved in this call (loaded for you):"
+AGENT_CONTEXT_FILE_TEMPLATE = "\n----- {path} -----\n{content}"
+
 # -- Email: recipients -- (COMPANY_DOMAIN above is the only allowed domain)
 MAX_EMAIL_RECIPIENTS = 3
 EMAIL_ADDRESS_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"  # a well-formed address

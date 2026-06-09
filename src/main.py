@@ -80,6 +80,7 @@ from settings import (
     VERSION_SELECT_TITLE,
     VERSIONS,
 )
+from context import format_for_agent
 from intercepter import InterceptContext, evaluate
 
 # Repo root (this file lives in src/, so the root is one level up). run_bash runs
@@ -459,11 +460,15 @@ def stream_turn(
             for block in tool_use_blocks:
                 inp = block.input if isinstance(block.input, dict) else {}
                 name = block.name
+                file_context: list[tuple[str, str]] = []
                 if intercept_ctx is not None:
-                    # Breaker Agent: the policy evaluator gates every tool call.
+                    # Breaker Agent: the evaluator gates the call and (on allow) hands
+                    # back the files the context module loaded, so they serve two
+                    # consumers — the evaluator (to judge) and, below, the agent
+                    # (appended to the result). Blocked calls load nothing off disk.
                     did_intercept = True
                     intercept_ctx.tool_calls_this_turn += 1
-                    blocked = evaluate(client, console, intercept_ctx, name, inp)
+                    blocked, file_context = evaluate(client, console, intercept_ctx, name, inp)
                     if blocked is not None:
                         tool_results.append(
                             {"type": "tool_result", "tool_use_id": block.id, "content": blocked}
@@ -485,6 +490,8 @@ def stream_turn(
                         }
                     )
                     continue
+                # Hand the agent the same files the context module loaded for this call.
+                result += format_for_agent(file_context)
                 tool_results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": result}
                 )
