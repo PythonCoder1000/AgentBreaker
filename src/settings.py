@@ -252,6 +252,10 @@ THINKING_LABEL = "Thinking..."
 SEARCHING_LABEL = "Searching..."
 EMAIL_LABEL = "Composing email..."
 BASH_LABEL = "Running command..."
+# Animated status shown in place beneath a tool call while it actually executes,
+# then replaced by the result once it finishes.
+BASH_RUNNING_LABEL = "running..."
+INTERCEPT_REVIEW_LABEL = "Reviewing policy..."
 
 # `rich` spinner name (run `python -m rich.spinner` to see them all). The refresh
 # rate drives both the spinner animation and the live markdown re-render.

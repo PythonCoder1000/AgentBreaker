@@ -24,11 +24,14 @@ from __future__ import annotations
 import json
 import posixpath
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
 from rich.console import Console
+from rich.live import Live
+from rich.padding import Padding
+from rich.spinner import Spinner
 from rich.text import Text
 
 from settings import (
@@ -53,9 +56,12 @@ from settings import (
     INTERCEPT_FAIL_OPEN,
     INTERCEPT_FILE_CONTEXT_CHARS,
     INTERCEPT_MAX_FILES_READ,
+    INTERCEPT_REVIEW_LABEL,
+    LIVE_REFRESH_PER_SECOND,
     MAX_ATTACHMENTS,
     MAX_EMAIL_RECIPIENTS,
     RESULT_PREFIX,
+    SPINNER_STYLE,
     TOOL_BULLET,
 )
 
@@ -79,12 +85,6 @@ class InterceptContext:
 
     task: str = ""  # the current user task (set each turn by main)
     tool_calls_this_turn: int = 0
-    bash_history: list[str] = field(default_factory=list)  # executed bash commands
-
-    def record(self, tool_name: str, tool_input: dict, executed: bool) -> None:
-        """Remember executed bash commands (for the 'attach unread file' rule)."""
-        if executed and tool_name == "run_bash":
-            self.bash_history.append(str(tool_input.get("command", "")))
 
 
 # --------------------------------------------------------------------------- #
@@ -215,19 +215,13 @@ def _hard_escalation(tool_name: str, tool_input: dict, context: InterceptContext
     if tool_name == "send_email":
         if len(_recipients(tool_input.get("email", ""))) > 1:
             return "emailing more than one person at once"
-        for path in _attachments(tool_input):
-            if not _was_read(path, context):
-                return f"attaching a file not read this session: {path}"
+        # Note: an attachment never read this session is no longer escalated — the
+        # AI evaluator auto-loads (reads) every attached file's contents below and
+        # judges it on what it actually contains, so unfamiliarity alone isn't cause.
     if tool_name == "run_bash":
         if any(p.search(str(tool_input.get("command", ""))) for p in _BASH_MODIFY):
             return "bash command modifies files (not just reads)"
     return None
-
-
-def _was_read(path: str, context: InterceptContext) -> bool:
-    """Whether the attachment's path/basename appears in an executed bash command."""
-    base = posixpath.basename(str(path))
-    return any(path in cmd or (base and base in cmd) for cmd in context.bash_history)
 
 
 # --------------------------------------------------------------------------- #
@@ -243,15 +237,24 @@ def _ai_evaluate(
     """Return (decision, reason) where decision is allow|block|escalate."""
     fallback = ("allow", "") if INTERCEPT_FAIL_OPEN else ("block", "policy evaluator unavailable")
     file_context = _gather_file_context(tool_name, tool_input)
+    # Animate the review: a transient spinner runs while the Claude call is in
+    # flight, then vanishes so the verdict line prints onto a clean console.
+    spinner = Spinner(SPINNER_STYLE, text=Text(INTERCEPT_REVIEW_LABEL, style="dim"))
     try:
-        response = client.messages.create(
-            model=INTERCEPT_AI_MODEL,
-            max_tokens=INTERCEPT_AI_MAX_TOKENS,
-            system=INTERCEPT_AI_SYSTEM,
-            messages=[
-                {"role": "user", "content": _ai_user_message(context, tool_name, tool_input, file_context)}
-            ],
-        )
+        with Live(
+            Padding(spinner, (0, 0, 0, len(RESULT_PREFIX))),
+            console=console,
+            refresh_per_second=LIVE_REFRESH_PER_SECOND,
+            transient=True,
+        ):
+            response = client.messages.create(
+                model=INTERCEPT_AI_MODEL,
+                max_tokens=INTERCEPT_AI_MAX_TOKENS,
+                system=INTERCEPT_AI_SYSTEM,
+                messages=[
+                    {"role": "user", "content": _ai_user_message(context, tool_name, tool_input, file_context)}
+                ],
+            )
     except anthropic.APIError as exc:
         console.print(Text(f"{RESULT_PREFIX}[policy evaluator error: {exc}]", style="red"))
         return fallback

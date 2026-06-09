@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
@@ -45,6 +46,7 @@ from settings import (
     BASH_MAX_OUTPUT_CHARS,
     BASH_NO_OUTPUT,
     BASH_RESULT_TEMPLATE,
+    BASH_RUNNING_LABEL,
     BASH_TIMEOUT_MSG,
     BASH_TIMEOUT_SECONDS,
     BASH_TRUNCATED_NOTE,
@@ -234,41 +236,61 @@ def _handle_run_bash(console: Console, tool_input: dict) -> str:
     """
     command = str(tool_input.get("command", ""))
 
+    # The "tool call" header (bullet + echoed command) appears first and stays put;
+    # only the line beneath it changes — a live spinner while the command runs, then
+    # the result (exit code + output) replaces the spinner in place once it finishes.
+    call_line = Text(f"{TOOL_BULLET} run_bash")
+    cmd_line = Text(f"{RESULT_PREFIX}$ {_sanitize(command)}")
+
+    def frame(*tail: object) -> Group:
+        return Group(call_line, cmd_line, *tail)
+
+    spinner = Spinner(SPINNER_STYLE, text=Text(BASH_RUNNING_LABEL, style="dim"))
+    running = frame(Padding(spinner, (0, 0, 0, len(RESULT_PREFIX))))
+
     console.print()
-    console.print(Text(f"{TOOL_BULLET} run_bash"))
-    console.print(Text(f"{RESULT_PREFIX}$ {_sanitize(command)}"))
+    with Live(
+        running,
+        console=console,
+        refresh_per_second=LIVE_REFRESH_PER_SECOND,
+        vertical_overflow="visible",  # don't crop long command output
+    ) as live:
+        try:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                executable=BASH_EXECUTABLE,
+                cwd=str(PROJECT_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # merge so output keeps its real ordering
+                text=True,
+                errors="replace",  # never raise on undecodable command output
+                start_new_session=True,  # own process group, so the timeout can reap children
+            )
+        except (OSError, ValueError) as exc:  # e.g. null byte in command, bad executable
+            live.update(frame(Text(f"{RESULT_PREFIX}failed", style="red")))
+            return BASH_ERROR_MSG.format(reason=str(exc) or "could not run command")
 
-    try:
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            executable=BASH_EXECUTABLE,
-            cwd=str(PROJECT_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # merge so output keeps its real ordering
-            text=True,
-            errors="replace",  # never raise on undecodable command output
-            start_new_session=True,  # own process group, so the timeout can reap children
+        try:
+            output, _ = proc.communicate(timeout=BASH_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            proc.communicate()  # drain pipes / reap the killed leader
+            live.update(frame(Text(f"{RESULT_PREFIX}timed out", style="red")))
+            return BASH_TIMEOUT_MSG.format(seconds=BASH_TIMEOUT_SECONDS)
+
+        output = output or ""
+        truncated = len(output) > BASH_MAX_OUTPUT_CHARS
+        shown = output[:BASH_MAX_OUTPUT_CHARS]
+
+        exit_line = Text(
+            f"{RESULT_PREFIX}exit {proc.returncode}",
+            style="green" if proc.returncode == 0 else "red",
         )
-    except (OSError, ValueError) as exc:  # e.g. null byte in command, bad executable
-        console.print(Text(f"{RESULT_PREFIX}failed", style="red"))
-        return BASH_ERROR_MSG.format(reason=str(exc) or "could not run command")
-
-    try:
-        output, _ = proc.communicate(timeout=BASH_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
-        proc.communicate()  # drain pipes / reap the killed leader
-        console.print(Text(f"{RESULT_PREFIX}timed out", style="red"))
-        return BASH_TIMEOUT_MSG.format(seconds=BASH_TIMEOUT_SECONDS)
-
-    output = output or ""
-    truncated = len(output) > BASH_MAX_OUTPUT_CHARS
-    shown = output[:BASH_MAX_OUTPUT_CHARS]
-
-    console.print(Text(f"{RESULT_PREFIX}exit {proc.returncode}"))
-    if shown.strip():
-        console.print(Text(_sanitize_block(shown)))
+        tail = [exit_line]
+        if shown.strip():
+            tail.append(Text(_sanitize_block(shown)))
+        live.update(frame(*tail))
 
     result = BASH_RESULT_TEMPLATE.format(code=proc.returncode, output=shown or BASH_NO_OUTPUT)
     if truncated:
@@ -443,12 +465,10 @@ def stream_turn(
                     intercept_ctx.tool_calls_this_turn += 1
                     blocked = evaluate(client, console, intercept_ctx, name, inp)
                     if blocked is not None:
-                        intercept_ctx.record(name, inp, executed=False)
                         tool_results.append(
                             {"type": "tool_result", "tool_use_id": block.id, "content": blocked}
                         )
                         continue
-                    intercept_ctx.record(name, inp, executed=True)
                 if name == "send_email":
                     sent_email = True
                     result = _handle_send_email(console, inp)
