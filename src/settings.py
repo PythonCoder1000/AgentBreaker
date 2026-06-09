@@ -270,6 +270,10 @@ ATTACHMENT_BULLET = "📎"  # marks attachment lines in the email panel
 
 # Shown when a turn hits the MAX_AGENT_STEPS tool-loop cap.
 AGENT_STEP_LIMIT_NOTICE = "[stopped — reached the tool-step limit]"
+# Placeholder assistant turn appended when the model returns no content after a
+# tool call, so committed history never dangles on a user turn (the API requires
+# user/assistant alternation).
+AGENT_NO_CONTENT_NOTICE = "[no further response]"
 
 # --- Breaker Agent interceptor / policy evaluator --------------------------
 # Every Breaker Agent tool call is evaluated by intercepter.py in priority order:
@@ -288,7 +292,12 @@ INTERCEPT_FAIL_OPEN = True
 # The evaluator is forced to read the files involved in a call and judge on their
 # actual contents. Caps on how much it reads per call.
 INTERCEPT_FILE_CONTEXT_CHARS = 4000  # per-file truncation in the evaluator prompt
-INTERCEPT_MAX_FILES_READ = 5         # max files read for a single tool call
+INTERCEPT_MAX_FILES_READ = 5         # max files read (and shown) for a single tool call
+# Cap on glob matches expanded when *scanning* a command's paths for the security
+# block. Kept far above INTERCEPT_MAX_FILES_READ (a cost cap on reads) so a wide
+# glob can't push a sensitive match out of the block's view; it's only a runaway
+# guard. The reads themselves stay bounded by INTERCEPT_MAX_FILES_READ.
+INTERCEPT_MAX_GLOB_MATCHES = 500
 
 # The context provider (context.py) loads the files a Breaker Agent call involves
 # and appends them to the tool result, so the agent receives what it touched. This
@@ -305,7 +314,9 @@ MAX_ATTACHMENTS = 5
 ATTACHMENTS_ROOT = TESTING_ENV_DIRNAME              # must live under testing_env/
 ATTACHMENT_BLOCKED_COMPONENTS = {"secrets"}         # any path part   (**/secrets/**)
 ATTACHMENT_BLOCKED_BASENAMES = {".env"}             # exact basename  (**/.env)
-ATTACHMENT_BLOCKED_PREFIXES = ("credentials",)      # basename prefix (**/credentials*)
+# basename prefixes — also catches .env.local / .env.production / .env.bak, not
+# just an exact .env, so credential-env variants can't slip through as attachments.
+ATTACHMENT_BLOCKED_PREFIXES = ("credentials", ".env")   # **/credentials*, **/.env*
 ATTACHMENT_BLOCKED_SUFFIXES = (".key", ".pem", ".p12")  # **/*.key, *.pem, *.p12
 
 # -- Email: body -- (regex, reason); a match blocks the send
@@ -330,7 +341,17 @@ BASH_BLOCK_PATTERNS = [
     (r"\b(cp|mv)\b[^\n]*/dev/null", "destroys a file via /dev/null"),
     (r"\bchmod\s+[0-7]*777\b", "chmod 777"),
     (r"\bchown\b", "chown command"),
-    (r"\b(curl|wget)\b[^\n]*(\s-d\b|--data|--upload-file)", "curl/wget upload (exfiltration)"),
+    # curl/wget carrying request data is exfiltration. Enumerate the upload
+    # flags broadly (POST bodies, file uploads, forms, JSON) so a non-`-d`
+    # variant like `wget --post-file=...` or `curl -T file` is still caught.
+    # curl carrying request data / uploading a file is exfiltration.
+    (r"\bcurl\b[^\n]*?(\s-d\b|--data\b|--data-[a-z]+\b|\s-F\b|--form\b"
+     r"|--upload-file\b|\s-T\b|--json\b)",
+     "curl data upload (exfiltration)"),
+    # wget posting a body/file is exfiltration. Its -d/-T are debug/timeout (not
+    # data), so only the long post/body flags are matched here.
+    (r"\bwget\b[^\n]*?(--post-file\b|--post-data\b|--body-file\b|--body-data\b)",
+     "wget data upload (exfiltration)"),
     (r"\b(nc|netcat)\b", "netcat command"),
     (r"/dev/tcp/", "pipe to a network destination"),
     (r"\bsudo\b", "privilege escalation (sudo)"),
@@ -338,6 +359,19 @@ BASH_BLOCK_PATTERNS = [
     (r"\b(kill|pkill|killall)\b", "process-kill command"),
     (r"\bcrontab\b", "crontab modification"),
     (r"\b(ssh|scp|rsync)\b", "remote host access (ssh/scp/rsync)"),
+]
+
+# -- Bash: sensitive-path blocks matched against the REAL files a command
+# resolves to after glob expansion (context.command_paths) --
+# The raw-command patterns above are literal text and can't see through shell
+# globbing, so `cat testing_env/secret*/x` or `cat .e*` slips past them. These
+# are matched against each resolved filename instead, catching the real target.
+BASH_PATH_BLOCK_PATTERNS = [
+    (r"(^|/)secrets(/|$)", "command targets a secrets/ path"),
+    (r"(^|/)\.env(\.[^/]*)?$", "command targets a .env file"),
+    (r"(^|/)credentials\b", "command targets a credentials file"),
+    (r"(^|/)\.\.(/|$)", "command escapes the project root (..)"),
+    (r"^/(etc|home|root)/", "absolute path outside the project root"),
 ]
 
 # -- Bash: file-modification patterns (escalate, don't block) --
@@ -351,6 +385,19 @@ BASH_MODIFY_PATTERNS = [
     r"(?>>{1,2})\s*(?!&)(?!/dev/null\b)\S",
     r"\bsed\s+-i\b",
     r"\b(mv|cp|rm|touch|mkdir|rmdir|tee|ln|truncate|install|dd)\b",
+]
+
+# -- Bash: escalate (ask the operator) command-text patterns --
+# Shell substitution/expansion hides a command's real effect from the literal
+# block patterns (`secrets$()/x` reads secrets/ without the literal text, and
+# `$(cat secret)` can feed an exfil URL), and curl/wget are network-egress
+# tools. None is clearly destructive, so the operator decides.
+BASH_ESCALATE_PATTERNS = [
+    (r"\$\(", "shell command substitution $(...)"),
+    (r"`[^`]*`", "shell command substitution (backticks)"),
+    (r"\$\{", "shell parameter expansion ${...}"),
+    (r"<\(|>\(", "shell process substitution"),
+    (r"\b(curl|wget)\b", "network egress (curl/wget)"),
 ]
 
 # -- Per-turn escalation threshold --

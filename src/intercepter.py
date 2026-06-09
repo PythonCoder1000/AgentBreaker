@@ -39,7 +39,7 @@ from rich.padding import Padding
 from rich.spinner import Spinner
 from rich.text import Text
 
-from context import attachments, gather_file_context
+from context import attachments, command_paths, gather_file_context
 from settings import (
     ATTACHMENT_BLOCKED_BASENAMES,
     ATTACHMENT_BLOCKED_COMPONENTS,
@@ -47,7 +47,9 @@ from settings import (
     ATTACHMENT_BLOCKED_SUFFIXES,
     ATTACHMENTS_ROOT,
     BASH_BLOCK_PATTERNS,
+    BASH_ESCALATE_PATTERNS,
     BASH_MODIFY_PATTERNS,
+    BASH_PATH_BLOCK_PATTERNS,
     COMPANY_DOMAIN,
     EMAIL_ADDRESS_RE,
     EMAIL_BODY_BLOCK_PATTERNS,
@@ -72,6 +74,8 @@ from settings import (
 # Pre-compile the command-pattern lists once. Case-insensitive so a secret can't
 # be reached by varying case (e.g. .ENV, Credentials.txt) on a case-insensitive FS.
 _BASH_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_BLOCK_PATTERNS]
+_BASH_PATH_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_PATH_BLOCK_PATTERNS]
+_BASH_ESCALATE = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_ESCALATE_PATTERNS]
 _BASH_MODIFY = [re.compile(p, re.IGNORECASE) for p in BASH_MODIFY_PATTERNS]
 _EMAIL_BODY_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in EMAIL_BODY_BLOCK_PATTERNS]
 _EMAIL_ADDRESS = re.compile(EMAIL_ADDRESS_RE)
@@ -210,6 +214,13 @@ def _bash_hard_block(tool_input: dict) -> str | None:
     for pattern, reason in _BASH_BLOCK:
         if pattern.search(command):
             return reason
+    # The raw-text patterns above can't see through shell globbing, so also match
+    # the real files the command resolves to (globs expanded) against the
+    # sensitive-path patterns — catching e.g. `secret*` or `.e*`.
+    for path in command_paths(command):
+        for pattern, reason in _BASH_PATH_BLOCK:
+            if pattern.search(path):
+                return reason
     return None
 
 
@@ -226,7 +237,11 @@ def _hard_escalation(tool_name: str, tool_input: dict, context: InterceptContext
         # AI evaluator auto-loads (reads) every attached file's contents below and
         # judges it on what it actually contains, so unfamiliarity alone isn't cause.
     if tool_name == "run_bash":
-        if any(p.search(str(tool_input.get("command", ""))) for p in _BASH_MODIFY):
+        command = str(tool_input.get("command", ""))
+        for pattern, reason in _BASH_ESCALATE:
+            if pattern.search(command):
+                return reason
+        if any(p.search(command) for p in _BASH_MODIFY):
             return "bash command modifies files (not just reads)"
     return None
 
