@@ -14,7 +14,7 @@ function Params({ params }) {
 }
 
 // A single feed event.
-function FeedItem({ ev, isLast, resolved, onDecide }) {
+function FeedItem({ ev, resolved, onDecide }) {
   const [clicked, setClicked] = useState(null);
 
   switch (ev.type) {
@@ -23,11 +23,6 @@ function FeedItem({ ev, isLast, resolved, onDecide }) {
         <span class="who">Injected prompt</span>
         <${Typewriter} text=${ev.text} />
       </div>`;
-
-    case "thinking":
-      // a thinking row only matters while it's the latest event
-      if (!isLast) return null;
-      return html`<div class="item thinking"><span class="spinner"></span> thinking…</div>`;
 
     case "tool_call":
       return html`<div class="item tool-call">
@@ -83,9 +78,6 @@ function FeedItem({ ev, isLast, resolved, onDecide }) {
     case "error":
       return html`<div class="item err">⚠ ${ev.message}</div>`;
 
-    case "done":
-      return html`<div class="item done">— run complete —</div>`;
-
     case "tool_result":
       if (!ev.output) return null;
       return html`<details class="item output">
@@ -98,10 +90,11 @@ function FeedItem({ ev, isLast, resolved, onDecide }) {
   }
 }
 
-// One agent column.
-export function Column({ kind, title, events, onDecide }) {
+// One agent column: its event feed plus a composer that messages this agent only.
+export function Column({ kind, title, events, running, onSend, onDecide }) {
   const feedRef = useRef(null);
   const prevLen = useRef(0);
+  const [input, setInput] = useState("");
   useEffect(() => {
     const el = feedRef.current;
     if (!el) return;
@@ -112,6 +105,11 @@ export function Column({ kind, title, events, onDecide }) {
     else el.scrollTop = el.scrollHeight;
     prevLen.current = events.length;
   }, [events]);
+  // Keep the "thinking…" row in view as soon as a run starts.
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el && running) el.scrollTop = el.scrollHeight;
+  }, [running]);
 
   // map escalation call_id -> outcome, from later allowed/blocked events
   const resolved = {};
@@ -120,20 +118,36 @@ export function Column({ kind, title, events, onDecide }) {
     if (ev.type === "tool_blocked" && ev.call_id) resolved[ev.call_id] = { outcome: "blocked" };
   }
 
+  const send = () => {
+    const text = input.trim();
+    if (!text || running) return;
+    setInput("");
+    onSend(text);
+  };
+
   return html`<div class=${"column " + kind}>
     <div class="column-head">
       <span class="tag"></span>
       <h2>${title}</h2>
     </div>
     <div class="feed" ref=${feedRef}>
-      ${events.length === 0
-        ? html`<div class="empty">Press <b>RUN</b> for a preset, or send a message below.</div>`
-        : events.map((ev, i) => html`<${FeedItem}
+      ${events.length === 0 && !running
+        ? html`<div class="empty">Press <b>RUN</b> for a preset, or message this agent below.</div>`
+        : html`${events.map((ev, i) => html`<${FeedItem}
             key=${i}
             ev=${ev}
-            isLast=${i === events.length - 1}
             resolved=${ev.call_id ? resolved[ev.call_id] : null}
             onDecide=${(callId, approve) => onDecide(kind, callId, approve)} />`)}
+          ${running ? html`<div class="item thinking"><span class="spinner"></span> thinking…</div>` : null}`}
+    </div>
+    <div class="col-composer">
+      <textarea rows="1"
+        placeholder=${"Message the " + title + "…"}
+        value=${input}
+        disabled=${running}
+        onInput=${(ev) => setInput(ev.target.value)}
+        onKeyDown=${(ev) => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); send(); } }} />
+      <button class="btn run" disabled=${running || !input.trim()} onClick=${send}>Send</button>
     </div>
   </div>`;
 }

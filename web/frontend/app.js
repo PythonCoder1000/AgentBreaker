@@ -18,43 +18,45 @@ function App() {
   const [view, setView] = useState("home");
   const [scenarios, setScenarios] = useState([]);
   const [selected, setSelected] = useState(0);
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState({ prompt: false, breaker: false });
   const [feeds, setFeeds] = useState({ prompt: [], breaker: [] });
-  const [input, setInput] = useState("");
 
-  const esRef = useRef([]);
+  const esRef = useRef({ prompt: null, breaker: null });
   const sessionRef = useRef(null);
-  const doneRef = useRef(0);
 
   useEffect(() => {
     sessionRef.current = newId();
     fetch("/api/scenarios").then((r) => r.json()).then(setScenarios).catch(() => {});
   }, []);
 
-  const closeStreams = useCallback(() => {
-    esRef.current.forEach((es) => es.close());
-    esRef.current = [];
+  const closeStream = useCallback((agent) => {
+    const es = esRef.current[agent];
+    if (es) { es.close(); esRef.current[agent] = null; }
   }, []);
+  const closeStreams = useCallback(() => { AGENTS.forEach(closeStream); }, [closeStream]);
 
-  // Open one SSE per agent; setParams(p, agent) adds scenario= or message=.
-  const openStreams = useCallback((setParams) => {
-    closeStreams();
-    doneRef.current = 0;
-    setRunning(true);
-    esRef.current = AGENTS.map((agent) => {
-      const p = new URLSearchParams({ session: sessionRef.current, agent });
-      setParams(p, agent);
-      const es = new EventSource(`/api/stream?${p.toString()}`);
-      es.onmessage = (e) => {
-        let ev;
-        try { ev = JSON.parse(e.data); } catch { return; }
-        setFeeds((f) => ({ ...f, [agent]: [...f[agent], ev] }));
-        if (ev.type === "done") { es.close(); if (++doneRef.current >= AGENTS.length) setRunning(false); }
-      };
-      es.onerror = () => { es.close(); if (++doneRef.current >= AGENTS.length) setRunning(false); };
-      return es;
-    });
-  }, [closeStreams]);
+  // Open one SSE for a single agent; setParams(p) adds scenario= or message=.
+  // Completion is signalled by clearing this agent's `running` flag (the column's
+  // "thinking…" row disappears) — there's no end-of-run marker event.
+  const openStream = useCallback((agent, setParams) => {
+    closeStream(agent);
+    setRunning((r) => ({ ...r, [agent]: true }));
+    const p = new URLSearchParams({ session: sessionRef.current, agent });
+    setParams(p);
+    const es = new EventSource(`/api/stream?${p.toString()}`);
+    const finish = () => { es.close(); esRef.current[agent] = null; setRunning((r) => ({ ...r, [agent]: false })); };
+    es.onmessage = (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch { return; }
+      // `thinking` is driven by the running flag; `done` just ends the stream —
+      // neither is rendered as a feed item.
+      if (ev.type === "done") { finish(); return; }
+      if (ev.type === "thinking") return;
+      setFeeds((f) => ({ ...f, [agent]: [...f[agent], ev] }));
+    };
+    es.onerror = finish;
+    esRef.current[agent] = es;
+  }, [closeStream]);
 
   const newSession = useCallback(() => {
     closeStreams();
@@ -65,21 +67,21 @@ function App() {
     }
     sessionRef.current = newId();
     setFeeds({ prompt: [], breaker: [] });
-    setRunning(false);
+    setRunning({ prompt: false, breaker: false });
   }, [closeStreams]);
 
   const runScenario = useCallback((idx) => {
     if (!scenarios.length) return;
     newSession();                                  // a preset starts a clean session
-    openStreams((p) => p.set("scenario", scenarios[idx].id));
-  }, [scenarios, newSession, openStreams]);
+    AGENTS.forEach((agent) => openStream(agent, (p) => p.set("scenario", scenarios[idx].id)));
+  }, [scenarios, newSession, openStream]);
 
-  const sendMessage = useCallback(() => {
-    const text = input.trim();
-    if (!text || running) return;
-    setInput("");
-    openStreams((p) => p.set("message", text));    // continue the current session
-  }, [input, running, openStreams]);
+  // Send a free-text message to ONE agent, continuing the current session.
+  const sendToAgent = useCallback((agent, text) => {
+    const msg = text.trim();
+    if (!msg || running[agent]) return;
+    openStream(agent, (p) => p.set("message", msg));
+  }, [running, openStream]);
 
   const onDecide = useCallback((agent, callId, approve) => {
     if (!sessionRef.current) return;
@@ -108,8 +110,8 @@ function App() {
       ? html`<${HomeView} scenarios=${scenarios} setView=${setView} />`
       : html`<${ChatView}
           scenarios=${scenarios} selected=${selected} setSelected=${setSelected}
-          running=${running} feeds=${feeds} input=${input} setInput=${setInput}
-          runScenario=${runScenario} sendMessage=${sendMessage} newSession=${newSession}
+          running=${running} feeds=${feeds}
+          runScenario=${runScenario} sendToAgent=${sendToAgent} newSession=${newSession}
           onDecide=${onDecide} />`}
   </div>`;
 }

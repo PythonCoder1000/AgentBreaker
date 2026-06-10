@@ -135,16 +135,6 @@ html, body {
 }
 .viewer-body .empty, .viewer-body .err { padding: 28px; }
 
-/* ---- Composer ---- */
-.composer { display: flex; gap: 10px; margin-top: 12px; }
-.composer textarea {
-  flex: 1; resize: none; min-height: 48px; max-height: 140px;
-  background: var(--panel); color: var(--text); border: 1px solid var(--border);
-  border-radius: 11px; padding: 13px 15px; font-family: var(--sans); font-size: 14px; line-height: 1.4;
-}
-.composer textarea:focus { outline: none; border-color: var(--accent); }
-.composer .btn.run { padding-left: 24px; padding-right: 24px; }
-
 /* ---- Home ---- */
 .home { flex: 1; overflow-y: auto; padding: 12px 6px 44px; }
 .c-prompt { color: var(--user); }
@@ -271,6 +261,20 @@ select {
 .column.breaker .tag { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
 .column-head h2 { font-size: 14px; margin: 0; }
 
+/* Per-column composer (message one agent at a time) */
+.col-composer {
+  display: flex; gap: 8px; padding: 10px; flex-shrink: 0;
+  border-top: 1px solid var(--border); background: var(--panel-2);
+}
+.col-composer textarea {
+  flex: 1; resize: none; min-height: 38px; max-height: 120px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 9px; padding: 9px 11px; font-family: var(--sans); font-size: 13px; line-height: 1.4;
+}
+.col-composer textarea:focus { outline: none; border-color: var(--accent); }
+.col-composer textarea:disabled { opacity: .55; cursor: not-allowed; }
+.col-composer .btn.run { padding: 8px 16px; align-self: stretch; }
+
 .feed { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 14px;
         display: flex; flex-direction: column; gap: 10px; }
 /* Keep each event at its natural height so the feed SCROLLS instead of squishing
@@ -347,7 +351,6 @@ select {
               white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 
 .err { color: var(--block); font-size: 12.5px; font-family: var(--mono); }
-.done { color: var(--dim); text-align: center; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; opacity: .7; padding: 4px; }
 
 @media (max-width: 980px) {
   .workspace { flex-direction: column; }
