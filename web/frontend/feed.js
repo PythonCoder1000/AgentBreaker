@@ -101,9 +101,16 @@ function FeedItem({ ev, isLast, resolved, onDecide }) {
 // One agent column.
 export function Column({ kind, title, events, onDecide }) {
   const feedRef = useRef(null);
+  const prevLen = useRef(0);
   useEffect(() => {
     const el = feedRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    // A new run/session clears the feed (length drops to 0 / shrinks): jump back
+    // to the top so the first thing the audience sees is the start of the run.
+    // While the run streams (events only ever append), follow along to the bottom.
+    if (events.length <= prevLen.current) el.scrollTop = 0;
+    else el.scrollTop = el.scrollHeight;
+    prevLen.current = events.length;
   }, [events]);
 
   // map escalation call_id -> outcome, from later allowed/blocked events
