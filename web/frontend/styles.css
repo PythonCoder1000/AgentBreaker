@@ -99,8 +99,41 @@ html, body {
 .frow .ficon { flex-shrink: 0; font-size: 12px; }
 .frow .fname { overflow: hidden; text-overflow: ellipsis; }
 .frow.dir .fname { font-weight: 600; }
+.frow.file { cursor: pointer; }
 .frow .fsize { margin-left: auto; padding-left: 10px; color: var(--dim); font-size: 10.5px; }
 .frow.secret .fname { color: var(--escalate); }
+
+/* ---- File viewer (click a file in the explorer) ---- */
+.viewer-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(5, 8, 14, .66);
+  display: flex; align-items: center; justify-content: center;
+  padding: 32px; animation: rise .12s ease;
+}
+.viewer {
+  display: flex; flex-direction: column;
+  width: min(900px, 100%); max-height: 100%;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+}
+.viewer-head {
+  display: flex; align-items: center; gap: 9px; padding: 11px 14px;
+  border-bottom: 1px solid var(--border); background: var(--panel-2); flex-shrink: 0;
+}
+.viewer-name { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+.viewer-size { color: var(--dim); font-size: 11px; }
+.viewer-close {
+  margin-left: auto; background: transparent; border: none; color: var(--dim);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 4px 8px; border-radius: 6px;
+}
+.viewer-close:hover { color: var(--text); background: var(--panel); }
+.viewer-body { overflow: auto; min-height: 0; }
+.viewer-pre {
+  margin: 0; padding: 16px; font-family: var(--mono); font-size: 12.5px;
+  line-height: 1.55; color: #b6c2d6; white-space: pre; word-break: normal;
+}
+.viewer-body .empty, .viewer-body .err { padding: 28px; }
 
 /* ---- Composer ---- */
 .composer { display: flex; gap: 10px; margin-top: 12px; }

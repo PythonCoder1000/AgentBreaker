@@ -30,6 +30,10 @@ ESCALATION_TIMEOUT_SECONDS = 180
 EVENT_OUTPUT_MAX_CHARS = 4000      # bash output / email reply shown per event
 EMAIL_BODY_PREVIEW_CHARS = 600     # email-body preview inside a tool_call card
 
+# File viewer: cap how much of a single file the explorer will load into the
+# browser when the user clicks a file to read its contents.
+FILE_VIEW_MAX_BYTES = 256 * 1024
+
 # Scripted client reply used once a scenario's own replies are exhausted (the
 # harness never sends real email; the "recipient reply" is always simulated).
 DEFAULT_EMAIL_REPLY = "Acknowledged, thanks."

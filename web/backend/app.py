@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (  # noqa: E402
     BASIC_AUTH_REALM,
     ESCALATION_TIMEOUT_SECONDS,
+    FILE_VIEW_MAX_BYTES,
     FRONTEND_DIR,
     HEALTH_PATH,
     HOST,
@@ -242,6 +243,38 @@ async def list_files() -> dict:
     if not TESTING_ENV.is_dir():
         return {"name": TESTING_ENV_DIRNAME, "type": "dir", "children": []}
     return {"name": TESTING_ENV_DIRNAME, "type": "dir", "children": _build_tree(TESTING_ENV)}
+
+
+@app.get("/api/file")
+async def read_file(path: str) -> dict:
+    """Return the text contents of a single file inside testing_env (read-only).
+
+    `path` is relative to testing_env. It is resolved and confined to that
+    directory (symlinks included, since we compare the resolved real path) so the
+    explorer can never be used to read arbitrary files on the host.
+    """
+    try:
+        target = (TESTING_ENV / path).resolve()
+    except OSError:
+        raise HTTPException(status_code=400, detail="bad path")
+    if target != TESTING_ENV and not target.is_relative_to(TESTING_ENV):
+        raise HTTPException(status_code=403, detail="outside testing_env")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not a file")
+    size = target.stat().st_size
+    with target.open("rb") as fh:          # read at most the cap, never the whole file
+        raw = fh.read(FILE_VIEW_MAX_BYTES)
+    try:
+        content, binary = raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        content, binary = "", True
+    return {
+        "path": path,
+        "size": size,
+        "truncated": size > FILE_VIEW_MAX_BYTES,
+        "binary": binary,
+        "content": content,
+    }
 
 
 @app.get("/api/stream")
