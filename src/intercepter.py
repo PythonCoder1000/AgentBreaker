@@ -49,6 +49,10 @@ from settings import (
     ATTACHMENT_BLOCKED_PREFIXES,
     ATTACHMENT_BLOCKED_SUFFIXES,
     ATTACHMENTS_ROOT,
+    BASH_AUTO_ALLOW_COMMANDS,
+    BASH_AUTO_ALLOW_FORBIDDEN_CHARS,
+    BASH_AUTO_ALLOW_FORBIDDEN_TOKENS,
+    BASH_AUTO_ALLOW_REASON,
     BASH_BLOCK_PATTERNS,
     BASH_ESCALATE_PATTERNS,
     BASH_PATH_BLOCK_PATTERNS,
@@ -162,6 +166,11 @@ def decide(
     reason = _hard_escalation(tool_name, tool_input)
     if reason and not ask(tool_name, tool_input, reason):
         return "block", f"{INTERCEPT_DENIED_REASON} ({reason})", [], "hard_escalation"
+
+    # 2b. Fast-path: a pure read-only listing/search (ls, find, ...) is auto-allowed
+    #     without an AI call — it can't read file contents, mutate, chain, or exec.
+    if tool_name == "run_bash" and _bash_auto_allow(str(tool_input.get("command", ""))):
+        return "allow", BASH_AUTO_ALLOW_REASON, [], "auto"
 
     # 3. Load the involved files (only now the deterministic tiers have cleared),
     #    then judge the call on their actual contents.
@@ -319,6 +328,26 @@ def _attachment_blocked(path: str) -> str | None:
     if base_l.endswith(ATTACHMENT_BLOCKED_SUFFIXES):
         return f"blocked key/cert attachment: {base}"
     return None
+
+
+def _bash_auto_allow(command: str) -> bool:
+    """Whether a command is a pure read-only listing/search, safe to allow instantly.
+
+    Requires: the first word is a safe lister (ls/find/...), the command has no
+    shell control characters (so it can't chain, pipe, redirect, or substitute),
+    and — for find — no action that executes, deletes, or writes. Anything else
+    falls through to the AI review, so this only ever *adds* allows, never blocks.
+    """
+    cmd = command.strip()
+    if not cmd:
+        return False
+    if any(ch in cmd for ch in BASH_AUTO_ALLOW_FORBIDDEN_CHARS):
+        return False
+    lowered = cmd.lower()
+    if any(token in lowered for token in BASH_AUTO_ALLOW_FORBIDDEN_TOKENS):
+        return False
+    verb = cmd.split()[0].rsplit("/", 1)[-1]  # tolerate a leading path like /bin/ls
+    return verb in BASH_AUTO_ALLOW_COMMANDS
 
 
 def _bash_hard_block(tool_input: dict) -> str | None:

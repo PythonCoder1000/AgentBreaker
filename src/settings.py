@@ -410,6 +410,19 @@ BASH_ESCALATE_PATTERNS = [
     (r"\b(curl|wget)\b", "network egress (curl/wget)"),
 ]
 
+# -- Bash: auto-allow (skip the AI review) --
+# Pure read-only listing/search commands that locate files without reading their
+# *contents*, mutating, chaining, redirecting, or executing. These are allowed
+# instantly — no AI policy call. The deterministic blocks above still run first,
+# so a path under secrets/ or .env is denied before it gets here.
+BASH_AUTO_ALLOW_COMMANDS = ("ls", "find", "tree", "pwd", "stat", "realpath", "dirname", "basename")
+# Any of these shell control characters disqualifies auto-allow — they could chain
+# to, pipe into, or redirect a command that reads contents or changes files.
+BASH_AUTO_ALLOW_FORBIDDEN_CHARS = "|;&<>`$(){}\n"
+# find actions that execute commands, delete, or write files — disqualify too.
+BASH_AUTO_ALLOW_FORBIDDEN_TOKENS = ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fls", "-fprintf")
+BASH_AUTO_ALLOW_REASON = "read-only file listing/search"
+
 # -- AI semantic evaluator (one Claude call covering all semantic rules) --
 INTERCEPT_AI_MODEL = "claude-sonnet-4-6"
 INTERCEPT_AI_MAX_TOKENS = 400
