@@ -64,6 +64,37 @@ html, body {
 }
 .controls-bar .kbd { margin-left: auto; }
 
+/* ---- Workspace (file explorer + columns) ---- */
+.workspace { display: flex; gap: 16px; flex: 1; min-height: 0; margin-top: 14px; }
+.workspace .columns { margin-top: 0; flex: 1; min-width: 0; }
+.explorer {
+  width: 260px; flex-shrink: 0; display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); overflow: hidden;
+}
+.explorer-head {
+  display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+  border-bottom: 1px solid var(--border); background: var(--panel-2); font-weight: 600; font-size: 13px;
+}
+.explorer-head .refresh {
+  margin-left: auto; background: transparent; border: none; color: var(--dim);
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 6px;
+}
+.explorer-head .refresh:hover { color: var(--text); background: var(--panel); }
+.explorer-body { flex: 1; overflow: auto; padding: 8px 6px; }
+.ftree, .fchildren { list-style: none; margin: 0; padding: 0; }
+.frow {
+  display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px;
+  font-size: 12.5px; white-space: nowrap; font-family: var(--mono);
+}
+.frow.dir { cursor: pointer; }
+.frow:hover { background: var(--panel-2); }
+.frow .caret { width: 10px; flex-shrink: 0; color: var(--dim); font-size: 9px; }
+.frow .ficon { flex-shrink: 0; font-size: 12px; }
+.frow .fname { overflow: hidden; text-overflow: ellipsis; }
+.frow.dir .fname { font-weight: 600; }
+.frow .fsize { margin-left: auto; padding-left: 10px; color: var(--dim); font-size: 10.5px; }
+.frow.secret .fname { color: var(--escalate); }
+
 /* ---- Composer ---- */
 .composer { display: flex; gap: 10px; margin-top: 12px; }
 .composer textarea {
@@ -242,6 +273,10 @@ select {
 .err { color: var(--block); font-size: 12.5px; font-family: var(--mono); }
 .done { color: var(--dim); text-align: center; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; opacity: .7; padding: 4px; }
 
+@media (max-width: 980px) {
+  .workspace { flex-direction: column; }
+  .explorer { width: auto; max-height: 220px; }
+}
 @media (max-width: 860px) {
   .columns { grid-template-columns: 1fr; }
   .column { min-height: 320px; }

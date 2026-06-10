@@ -229,6 +229,62 @@ function Column({ kind, title, events, onDecide }) {
 }
 
 // ---- app -------------------------------------------------------------------
+// ---- file explorer (read-only testing_env tree) ----------------------------
+function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+const SECRET_RE = /(^\.env|credential|secret|\.key$|\.pem$|\.p12$)/i;
+
+function FileNode({ node, depth }) {
+  const [open, setOpen] = useState(depth < 1);
+  const pad = { paddingLeft: depth * 14 + 8 + "px" };
+  if (node.type === "dir") {
+    const secret = /secret/i.test(node.name);
+    return html`<li>
+      <div class=${"frow dir" + (secret ? " secret" : "")} style=${pad} onClick=${() => setOpen((o) => !o)}>
+        <span class="caret">${open ? "▾" : "▸"}</span>
+        <span class="ficon">${open ? "📂" : "📁"}</span>
+        <span class="fname">${node.name}</span>
+      </div>
+      ${open
+        ? html`<ul class="fchildren">${(node.children || []).map((c, i) => html`<${FileNode} key=${i} node=${c} depth=${depth + 1} />`)}</ul>`
+        : null}
+    </li>`;
+  }
+  const secret = SECRET_RE.test(node.name);
+  return html`<li>
+    <div class=${"frow file" + (secret ? " secret" : "")} style=${pad}>
+      <span class="caret"></span>
+      <span class="ficon">${secret ? "🔑" : "📄"}</span>
+      <span class="fname">${node.name}</span>
+      <span class="fsize">${fmtSize(node.size)}</span>
+    </div>
+  </li>`;
+}
+
+function FileExplorer({ running }) {
+  const [tree, setTree] = useState(null);
+  const load = useCallback(() => {
+    fetch("/api/files").then((r) => r.json()).then(setTree).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (!running) load(); }, [running, load]); // refresh after each turn
+  return html`<aside class="explorer">
+    <div class="explorer-head">
+      <span class="ficon">📁</span><span>testing_env</span>
+      <button class="refresh" title="Refresh" onClick=${load}>↻</button>
+    </div>
+    <div class="explorer-body">
+      ${tree
+        ? html`<ul class="ftree">${(tree.children || []).map((c, i) => html`<${FileNode} key=${i} node=${c} depth=${0} />`)}</ul>`
+        : html`<div class="empty">loading…</div>`}
+    </div>
+  </aside>`;
+}
+
 function Navbar({ view, setView }) {
   const link = (id, label) =>
     html`<button class=${"nav-link" + (view === id ? " active" : "")} onClick=${() => setView(id)}>${label}</button>`;
@@ -279,6 +335,7 @@ function HomeView({ scenarios, setView }) {
 // ---- chat view -------------------------------------------------------------
 function ChatView({ scenarios, selected, setSelected, running, feeds, input, setInput,
                     runScenario, sendMessage, newSession, onDecide }) {
+  const [showFiles, setShowFiles] = useState(true);
   const current = scenarios[selected];
   return html`<div class="chat">
     <div class="controls-bar">
@@ -292,14 +349,18 @@ function ChatView({ scenarios, selected, setSelected, running, feeds, input, set
         ${running ? "RUNNING…" : "▶ RUN"}
       </button>
       <button class="btn ghost" disabled=${running} onClick=${newSession}>+ New session</button>
+      <button class="btn ghost" onClick=${() => setShowFiles((s) => !s)}>${showFiles ? "Hide files" : "📁 Files"}</button>
       <div class="kbd"><span><b>N</b> next</span><span><b>R</b> replay</span></div>
     </div>
 
     ${current ? html`<div class="scenario-bar"><b>Preset:</b> ${current.task}</div>` : null}
 
-    <div class="columns">
-      <${Column} kind="prompt" title="Prompt Agent" events=${feeds.prompt} onDecide=${onDecide} />
-      <${Column} kind="breaker" title="Breaker Agent" events=${feeds.breaker} onDecide=${onDecide} />
+    <div class="workspace">
+      ${showFiles ? html`<${FileExplorer} running=${running} />` : null}
+      <div class="columns">
+        <${Column} kind="prompt" title="Prompt Agent" events=${feeds.prompt} onDecide=${onDecide} />
+        <${Column} kind="breaker" title="Breaker Agent" events=${feeds.breaker} onDecide=${onDecide} />
+      </div>
     </div>
 
     <div class="composer">

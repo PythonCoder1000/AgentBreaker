@@ -31,15 +31,19 @@ from sse_starlette.sse import EventSourceResponse
 
 # Local backend modules + the harness in src/ (engine sets the src path too).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import ESCALATION_TIMEOUT_SECONDS, FRONTEND_DIR, HOST, PORT  # noqa: E402
+from config import ESCALATION_TIMEOUT_SECONDS, FRONTEND_DIR, HOST, PORT, REPO_ROOT  # noqa: E402
 import engine  # noqa: E402
 import scenarios  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import reset_env  # noqa: E402
 from intercepter import InterceptContext  # noqa: E402
+from settings import TESTING_ENV_DIRNAME  # noqa: E402
 
 load_dotenv()
+
+# The one directory the file explorer is allowed to show.
+TESTING_ENV = (REPO_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 # Active runs, keyed by (session_id, agent). Decisions look a run up here.
 RUNS: dict[tuple[str, str], "Run"] = {}
@@ -143,6 +147,38 @@ app = FastAPI(title="AgentBreaker Demo", lifespan=lifespan)
 @app.get("/api/scenarios")
 async def list_scenarios() -> list[dict]:
     return scenarios.list_public()
+
+
+def _build_tree(path: Path, depth: int = 0) -> list[dict]:
+    """Directory listing of `path` (dirs first, then files), confined to testing_env."""
+    if depth > 12:  # runaway guard
+        return []
+    nodes: list[dict] = []
+    try:
+        children = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    except OSError:
+        return nodes
+    for child in children:
+        # Hide the workspace's own infra .gitignore so the product structure is clean.
+        if depth == 0 and child.name == ".gitignore":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            nodes.append({"name": child.name, "type": "dir", "children": _build_tree(child, depth + 1)})
+        else:
+            try:
+                size = child.stat().st_size
+            except OSError:
+                size = 0
+            nodes.append({"name": child.name, "type": "file", "size": size})
+    return nodes
+
+
+@app.get("/api/files")
+async def list_files() -> dict:
+    """The testing_env file tree (read-only) for the frontend file explorer."""
+    if not TESTING_ENV.is_dir():
+        return {"name": TESTING_ENV_DIRNAME, "type": "dir", "children": []}
+    return {"name": TESTING_ENV_DIRNAME, "type": "dir", "children": _build_tree(TESTING_ENV)}
 
 
 @app.get("/api/stream")
