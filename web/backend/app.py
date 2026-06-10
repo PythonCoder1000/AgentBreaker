@@ -14,16 +14,18 @@ worker thread until /api/decision resolves them (or a timeout denies them).
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
+import secrets
 import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from rich.console import Console
@@ -31,7 +33,15 @@ from sse_starlette.sse import EventSourceResponse
 
 # Local backend modules + the harness in src/ (engine sets the src path too).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import ESCALATION_TIMEOUT_SECONDS, FRONTEND_DIR, HOST, PORT, REPO_ROOT  # noqa: E402
+from config import (  # noqa: E402
+    BASIC_AUTH_REALM,
+    ESCALATION_TIMEOUT_SECONDS,
+    FRONTEND_DIR,
+    HEALTH_PATH,
+    HOST,
+    PORT,
+    REPO_ROOT,
+)
 import engine  # noqa: E402
 import scenarios  # noqa: E402
 
@@ -142,6 +152,59 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AgentBreaker Demo", lifespan=lifespan)
+
+# Optional HTTP Basic Auth gate. Active only when both env vars are set, so local
+# dev stays open but a public deployment can require a password — important here
+# because the Prompt Agent has real shell/file tools and no enforced policy, and
+# every run spends Anthropic credits.
+_AUTH_USER = os.getenv("BASIC_AUTH_USER")
+_AUTH_PASS = os.getenv("BASIC_AUTH_PASS")
+_AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
+
+# Make the security posture impossible to miss in the logs: a public deploy that
+# forgets the creds (or sets only one) would otherwise run silently wide open.
+if _AUTH_ENABLED:
+    print("[auth] HTTP Basic Auth ENABLED — requests require a username + password.", flush=True)
+elif _AUTH_USER or _AUTH_PASS:
+    print("[auth] WARNING: only one of BASIC_AUTH_USER / BASIC_AUTH_PASS is set — "
+          "auth is DISABLED. Set BOTH to require a login.", flush=True)
+else:
+    print("[auth] WARNING: no BASIC_AUTH_USER / BASIC_AUTH_PASS set — running OPEN "
+          "(no password). Fine for local dev; set both before any public deploy.", flush=True)
+
+
+def _auth_ok(header: str) -> bool:
+    """Constant-time check of an `Authorization: Basic …` header against the env creds."""
+    # Scheme token is case-insensitive per RFC 7617.
+    if header[:6].lower() != "basic ":
+        return False
+    try:
+        user, _, pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    # Compare on bytes (compare_digest rejects non-ASCII str); evaluate both fields
+    # so timing doesn't leak which one failed.
+    user_ok = secrets.compare_digest(user.encode("utf-8"), (_AUTH_USER or "").encode("utf-8"))
+    pass_ok = secrets.compare_digest(pw.encode("utf-8"), (_AUTH_PASS or "").encode("utf-8"))
+    return user_ok and pass_ok
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    # No creds configured → open (local dev). Health check is always exempt so the
+    # platform can probe liveness without a password.
+    if _AUTH_ENABLED and request.url.path != HEALTH_PATH:
+        if not _auth_ok(request.headers.get("authorization", "")):
+            return Response(
+                status_code=401,
+                headers={"WWW-Authenticate": f'Basic realm="{BASIC_AUTH_REALM}"'},
+            )
+    return await call_next(request)
+
+
+@app.get(HEALTH_PATH)
+async def health() -> dict:
+    return {"ok": True}
 
 
 @app.get("/api/scenarios")

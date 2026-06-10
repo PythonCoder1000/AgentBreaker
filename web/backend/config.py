@@ -8,8 +8,19 @@ SRC_DIR = REPO_ROOT / "src"
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 
 # Server. (8000 is commonly taken by other local dev servers; 8010 avoids the clash.)
+# In a deployment the platform injects $PORT and you bind 0.0.0.0 via the start
+# command (see render.yaml); these defaults are for local `python app.py`.
 HOST = "127.0.0.1"
 PORT = 8010
+
+# Optional HTTP Basic Auth gate. Enabled only when BASIC_AUTH_USER and
+# BASIC_AUTH_PASS are both set in the environment (so local dev stays open).
+# This realm string is what the browser shows in its login dialog.
+BASIC_AUTH_REALM = "AgentBreaker demo"
+
+# Unauthenticated liveness path, so a hosting platform can health-check the app
+# without tripping the auth gate.
+HEALTH_PATH = "/healthz"
 
 # How long the engine waits for a human approve/deny on an escalation before it
 # defaults to deny — so a worker thread can't hang forever if the browser leaves.
