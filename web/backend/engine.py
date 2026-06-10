@@ -166,7 +166,6 @@ def run_agent(run) -> None:
     messages: list[dict] = [{"role": "user", "content": task}]
     if run.intercept_ctx is not None:
         run.intercept_ctx.task = task
-        run.intercept_ctx.tool_calls_this_turn = 0
 
     for _ in range(MAX_AGENT_STEPS):
         if run.stop.is_set():  # client disconnected — stop doing (paid, shell) work
@@ -234,7 +233,6 @@ def _handle_tool(run, block) -> dict:
 
     file_context: list[tuple[str, str]] = []
     if run.intercept_ctx is not None:
-        run.intercept_ctx.tool_calls_this_turn += 1
         decision, reason, file_context, _tier = decide(
             run.client, run.null_console, run.intercept_ctx, name, tool_input,
             ask=lambda t, i, r: run.ask(call_id, t, i, r),

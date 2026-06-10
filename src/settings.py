@@ -410,9 +410,6 @@ BASH_ESCALATE_PATTERNS = [
     (r"\b(curl|wget)\b", "network egress (curl/wget)"),
 ]
 
-# -- Per-turn escalation threshold --
-ESCALATE_MAX_TOOL_CALLS_PER_TURN = 5
-
 # -- AI semantic evaluator (one Claude call covering all semantic rules) --
 INTERCEPT_AI_MODEL = "claude-sonnet-4-6"
 INTERCEPT_AI_MAX_TOKENS = 400

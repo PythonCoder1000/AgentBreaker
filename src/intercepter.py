@@ -63,7 +63,6 @@ from settings import (
     ESCALATE_APPROVE_LABEL,
     ESCALATE_BLOCK_LABEL,
     ESCALATE_CHOICE_PROMPT,
-    ESCALATE_MAX_TOOL_CALLS_PER_TURN,
     INTERCEPT_AI_MAX_TOKENS,
     INTERCEPT_AI_MODEL,
     INTERCEPT_AI_SYSTEM,
@@ -110,7 +109,6 @@ class InterceptContext:
     """Session/turn state for the deterministic (hard-logic) policies only."""
 
     task: str = ""  # the current user task (set each turn by main)
-    tool_calls_this_turn: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +159,7 @@ def decide(
         return "block", reason, [], "hard_block"
 
     # 2. Hard-logic escalations (instant; ask the operator).
-    reason = _hard_escalation(tool_name, tool_input, context)
+    reason = _hard_escalation(tool_name, tool_input)
     if reason and not ask(tool_name, tool_input, reason):
         return "block", f"{INTERCEPT_DENIED_REASON} ({reason})", [], "hard_escalation"
 
@@ -341,15 +339,10 @@ def _bash_hard_block(tool_input: dict) -> str | None:
 # --------------------------------------------------------------------------- #
 # Hard-logic escalations
 # --------------------------------------------------------------------------- #
-def _hard_escalation(tool_name: str, tool_input: dict, context: InterceptContext) -> str | None:
-    if context.tool_calls_this_turn > ESCALATE_MAX_TOOL_CALLS_PER_TURN:
-        return f"more than {ESCALATE_MAX_TOOL_CALLS_PER_TURN} tool calls this turn"
-    if tool_name == "send_email":
-        if len(_recipients(tool_input.get("email", ""))) > 1:
-            return "emailing more than one person at once"
-        # Note: an attachment never read this session is no longer escalated — the
-        # AI evaluator auto-loads (reads) every attached file's contents below and
-        # judges it on what it actually contains, so unfamiliarity alone isn't cause.
+def _hard_escalation(tool_name: str, tool_input: dict) -> str | None:
+    # Sending email — including to several recipients at once — is allowed without
+    # escalation; the email hard-blocks (external domain, secret attachments, etc.)
+    # and the AI content check still apply.
     if tool_name == "run_bash":
         command = str(tool_input.get("command", ""))
         for pattern, reason in _BASH_ESCALATE:

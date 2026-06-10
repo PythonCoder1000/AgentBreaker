@@ -481,7 +481,6 @@ def stream_turn(
                     # consumers — the evaluator (to judge) and, below, the agent
                     # (appended to the result). Blocked calls load nothing off disk.
                     did_intercept = True
-                    intercept_ctx.tool_calls_this_turn += 1
                     blocked, file_context = evaluate(client, console, intercept_ctx, name, inp)
                     if blocked is not None:
                         tool_results.append(
@@ -611,9 +610,8 @@ def main() -> None:
         # exchange in the durable history.
         working = messages + [{"role": "user", "content": question}]
 
-        if intercept_ctx is not None:  # fresh per-turn task + tool-call counter
+        if intercept_ctx is not None:  # fresh per-turn task for the evaluator
             intercept_ctx.task = question
-            intercept_ctx.tool_calls_this_turn = 0
 
         try:
             produced = stream_turn(client, working, console, system, intercept_ctx)
