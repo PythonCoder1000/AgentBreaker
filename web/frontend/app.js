@@ -217,7 +217,7 @@ function Column({ kind, title, events, onDecide }) {
     </div>
     <div class="feed" ref=${feedRef}>
       ${events.length === 0
-        ? html`<div class="empty">Pick a scenario and press <b>RUN</b>.</div>`
+        ? html`<div class="empty">Press <b>RUN</b> for a preset, or send a message below.</div>`
         : events.map((ev, i) => html`<${FeedItem}
             key=${i}
             ev=${ev}
@@ -229,17 +229,109 @@ function Column({ kind, title, events, onDecide }) {
 }
 
 // ---- app -------------------------------------------------------------------
+function Navbar({ view, setView }) {
+  const link = (id, label) =>
+    html`<button class=${"nav-link" + (view === id ? " active" : "")} onClick=${() => setView(id)}>${label}</button>`;
+  return html`<nav class="navbar">
+    <div class="brand"><h1>Agent<span class="dot">Breaker</span></h1></div>
+    <div class="nav-links">${link("home", "Home")}${link("chat", "Chat")}</div>
+  </nav>`;
+}
+
+// ---- home: comparison table ------------------------------------------------
+const STATUS = {
+  works: { icon: "✓", label: "Holds", cls: "ok" },
+  fails: { icon: "✗", label: "Fails", cls: "bad" },
+  uncertain: { icon: "~", label: "Uncertain", cls: "warn" },
+};
+function StatusCell({ status }) {
+  const s = STATUS[status] || STATUS.uncertain;
+  return html`<span class=${"status " + s.cls}><b>${s.icon}</b> ${s.label}</span>`;
+}
+function HomeView({ scenarios, setView }) {
+  return html`<div class="home">
+    <div class="home-hero">
+      <h2>Two agents, one job — which one actually holds the line?</h2>
+      <p>Both run the same tasks with the same tools. The <b class="c-prompt">Prompt Agent</b>
+        relies on guardrails written into its system prompt. The
+        <b class="c-breaker">Breaker Agent</b> drops those prompt rules and instead routes
+        every tool call through a dedicated security framework that inspects what each call
+        actually does.</p>
+    </div>
+    <table class="compare">
+      <thead><tr>
+        <th>Attack</th>
+        <th><span class="c-prompt">Prompt Agent</span><span class="th-sub">system-prompt rules</span></th>
+        <th><span class="c-breaker">Breaker Agent</span><span class="th-sub">dedicated security framework</span></th>
+      </tr></thead>
+      <tbody>
+        ${scenarios.map((s) => html`<tr key=${s.id}>
+          <td class="atk"><b>${s.name}</b><span class="atk-sub">${s.tagline}</span></td>
+          <td><${StatusCell} status=${s.prompt_status} /></td>
+          <td><${StatusCell} status=${s.breaker_status} /></td>
+        </tr>`)}
+      </tbody>
+    </table>
+    <button class="btn run" onClick=${() => setView("chat")}>Try it live →</button>
+  </div>`;
+}
+
+// ---- chat view -------------------------------------------------------------
+function ChatView({ scenarios, selected, setSelected, running, feeds, input, setInput,
+                    runScenario, sendMessage, newSession, onDecide }) {
+  const current = scenarios[selected];
+  return html`<div class="chat">
+    <div class="controls-bar">
+      <div class="select-wrap">
+        <label>Preset attack</label>
+        <select value=${selected} onChange=${(e) => setSelected(Number(e.target.value))}>
+          ${scenarios.map((s, i) => html`<option key=${s.id} value=${i}>${s.name}</option>`)}
+        </select>
+      </div>
+      <button class="btn run" disabled=${running || !scenarios.length} onClick=${() => runScenario(selected)}>
+        ${running ? "RUNNING…" : "▶ RUN"}
+      </button>
+      <button class="btn ghost" disabled=${running} onClick=${newSession}>+ New session</button>
+      <div class="kbd"><span><b>N</b> next</span><span><b>R</b> replay</span></div>
+    </div>
+
+    ${current ? html`<div class="scenario-bar"><b>Preset:</b> ${current.task}</div>` : null}
+
+    <div class="columns">
+      <${Column} kind="prompt" title="Prompt Agent" events=${feeds.prompt} onDecide=${onDecide} />
+      <${Column} kind="breaker" title="Breaker Agent" events=${feeds.breaker} onDecide=${onDecide} />
+    </div>
+
+    <div class="composer">
+      <textarea rows="1"
+        placeholder="Message both agents…  (Enter to send · Shift+Enter for a newline)"
+        value=${input}
+        onInput=${(ev) => setInput(ev.target.value)}
+        onKeyDown=${(ev) => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); sendMessage(); } }} />
+      <button class="btn run" disabled=${running || !input.trim()} onClick=${sendMessage}>Send</button>
+    </div>
+  </div>`;
+}
+
+// ---- app -------------------------------------------------------------------
+function newId() {
+  return (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+}
+
 function App() {
+  const [view, setView] = useState("home");
   const [scenarios, setScenarios] = useState([]);
   const [selected, setSelected] = useState(0);
   const [running, setRunning] = useState(false);
   const [feeds, setFeeds] = useState({ prompt: [], breaker: [] });
+  const [input, setInput] = useState("");
 
   const esRef = useRef([]);
   const sessionRef = useRef(null);
   const doneRef = useRef(0);
 
   useEffect(() => {
+    sessionRef.current = newId();
     fetch("/api/scenarios").then((r) => r.json()).then(setScenarios).catch(() => {});
   }, []);
 
@@ -248,97 +340,81 @@ function App() {
     esRef.current = [];
   }, []);
 
-  const run = useCallback((idx) => {
-    if (!scenarios.length) return;
-    const scenario = scenarios[idx];
+  // Open one SSE per agent; setParams(p, agent) adds scenario= or message=.
+  const openStreams = useCallback((setParams) => {
     closeStreams();
-    const session = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
-    sessionRef.current = session;
     doneRef.current = 0;
-    setFeeds({ prompt: [], breaker: [] });
     setRunning(true);
-
     esRef.current = AGENTS.map((agent) => {
-      const url = `/api/stream?session=${session}&agent=${agent}&scenario=${scenario.id}`;
-      const es = new EventSource(url);
+      const p = new URLSearchParams({ session: sessionRef.current, agent });
+      setParams(p, agent);
+      const es = new EventSource(`/api/stream?${p.toString()}`);
       es.onmessage = (e) => {
         let ev;
         try { ev = JSON.parse(e.data); } catch { return; }
         setFeeds((f) => ({ ...f, [agent]: [...f[agent], ev] }));
-        if (ev.type === "done") {
-          es.close();
-          doneRef.current += 1;
-          if (doneRef.current >= AGENTS.length) setRunning(false);
-        }
+        if (ev.type === "done") { es.close(); if (++doneRef.current >= AGENTS.length) setRunning(false); }
       };
-      es.onerror = () => {
-        es.close();
-        doneRef.current += 1;
-        if (doneRef.current >= AGENTS.length) setRunning(false);
-      };
+      es.onerror = () => { es.close(); if (++doneRef.current >= AGENTS.length) setRunning(false); };
       return es;
     });
-  }, [scenarios, closeStreams]);
+  }, [closeStreams]);
+
+  const newSession = useCallback(() => {
+    closeStreams();
+    const old = sessionRef.current;
+    if (old) {
+      fetch("/api/reset", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: old }) }).catch(() => {});
+    }
+    sessionRef.current = newId();
+    setFeeds({ prompt: [], breaker: [] });
+    setRunning(false);
+  }, [closeStreams]);
+
+  const runScenario = useCallback((idx) => {
+    if (!scenarios.length) return;
+    newSession();                                  // a preset starts a clean session
+    openStreams((p) => p.set("scenario", scenarios[idx].id));
+  }, [scenarios, newSession, openStreams]);
+
+  const sendMessage = useCallback(() => {
+    const text = input.trim();
+    if (!text || running) return;
+    setInput("");
+    openStreams((p) => p.set("message", text));    // continue the current session
+  }, [input, running, openStreams]);
 
   const onDecide = useCallback((agent, callId, approve) => {
     if (!sessionRef.current) return;
-    fetch("/api/decision", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: sessionRef.current, agent, call_id: callId, approve }),
-    }).catch(() => {});
+    fetch("/api/decision", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: sessionRef.current, agent, call_id: callId, approve }) }).catch(() => {});
   }, []);
 
-  // keyboard: N -> next scenario + run, R -> replay current
+  // keyboard (chat view only): N -> next preset + run, R -> replay
   useEffect(() => {
     const onKey = (e) => {
+      if (view !== "chat") return;
       if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
       if (e.key === "n" || e.key === "N") {
-        setSelected((s) => {
-          const next = scenarios.length ? (s + 1) % scenarios.length : 0;
-          run(next);
-          return next;
-        });
+        setSelected((s) => { const next = scenarios.length ? (s + 1) % scenarios.length : 0; runScenario(next); return next; });
       } else if (e.key === "r" || e.key === "R") {
-        run(selected);
+        runScenario(selected);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [scenarios, selected, run]);
-
-  const current = scenarios[selected];
+  }, [view, scenarios, selected, runScenario]);
 
   return html`<div class="app">
-    <div class="header">
-      <div class="brand">
-        <h1>Agent<span class="dot">Breaker</span></h1>
-        <span class="sub">Prompt Agent vs Breaker Agent · live policy demo</span>
-      </div>
-      <div class="controls">
-        <div class="select-wrap">
-          <label>Scenario</label>
-          <select value=${selected} onChange=${(e) => setSelected(Number(e.target.value))}>
-            ${scenarios.map((s, i) => html`<option key=${s.id} value=${i}>${s.name}</option>`)}
-          </select>
-        </div>
-        <button class="btn run" disabled=${running || !scenarios.length} onClick=${() => run(selected)}>
-          ${running ? "RUNNING…" : "▶ RUN BOTH"}
-        </button>
-        <div class="kbd"><span><b>N</b> next</span><span><b>R</b> replay</span></div>
-      </div>
-    </div>
-
-    ${current
-      ? html`<div class="scenario-bar"><b>Task:</b> ${current.task}</div>`
-      : null}
-
-    <div class="columns">
-      <${Column} kind="prompt" title="Prompt Agent"
-        events=${feeds.prompt} onDecide=${onDecide} />
-      <${Column} kind="breaker" title="Breaker Agent"
-        events=${feeds.breaker} onDecide=${onDecide} />
-    </div>
+    <${Navbar} view=${view} setView=${setView} />
+    ${view === "home"
+      ? html`<${HomeView} scenarios=${scenarios} setView=${setView} />`
+      : html`<${ChatView}
+          scenarios=${scenarios} selected=${selected} setSelected=${setSelected}
+          running=${running} feeds=${feeds} input=${input} setInput=${setInput}
+          runScenario=${runScenario} sendMessage=${sendMessage} newSession=${newSession}
+          onDecide=${onDecide} />`}
   </div>`;
 }
 
