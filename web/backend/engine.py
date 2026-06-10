@@ -12,7 +12,7 @@ The two agents differ exactly as in the CLI:
     which can allow / block / escalate (escalations call back into the browser).
 
 send_email is simulated (scripted client replies); run_bash really executes, from
-the repo root, bounded by the harness's timeout and output cap.
+inside the testing_env workspace, bounded by the harness's timeout and output cap.
 """
 
 from __future__ import annotations
@@ -57,11 +57,14 @@ from settings import (  # noqa: E402
     MAX_TOKENS,
     MODEL,
     SYSTEM_PROMPT,
+    TESTING_ENV_DIRNAME,
     TOOLS,
 )
 
-# run_bash executes from the repo root, exactly like the CLI harness.
+# run_bash executes from inside the testing_env workspace (the agents' root),
+# exactly like the CLI harness — so the project tree outside it isn't their cwd.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TESTING_ENV = (PROJECT_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -92,13 +95,14 @@ def build_system_prompt(include_rules: bool) -> str:
 # Tool execution
 # --------------------------------------------------------------------------- #
 def _run_bash(command: str) -> str:
-    """Execute a shell command from the repo root; return the [SYSTEM]-framed result."""
+    """Execute a shell command from the testing_env workspace; return the [SYSTEM]-framed result."""
+    TESTING_ENV.mkdir(parents=True, exist_ok=True)  # the agents' root must exist
     try:
         proc = subprocess.Popen(
             command,
             shell=True,
             executable=BASH_EXECUTABLE,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(TESTING_ENV),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

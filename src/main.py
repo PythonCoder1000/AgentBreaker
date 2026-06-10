@@ -88,10 +88,11 @@ from settings import (
 from context import format_for_agent
 from intercepter import InterceptContext, evaluate
 
-# Repo root (this file lives in src/, so the root is one level up). run_bash runs
-# from here, so the agent operates across the whole project directory.
+# Repo root (this file lives in src/, so the root is one level up).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# The scenario folder (seeded by reset_env.py); ensured to exist at startup.
+# The scenario folder (seeded by reset_env.py); ensured to exist at startup. This
+# is also the agents' shell root: run_bash runs with cwd=TESTING_ENV, so the wider
+# project tree isn't their working directory.
 TESTING_ENV = (PROJECT_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")  # all C0 controls (incl. ESC) + DEL
@@ -231,7 +232,7 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
 
 
 def _handle_run_bash(console: Console, tool_input: dict) -> str:
-    """Run a shell command from the project root and return its output to the agent.
+    """Run a shell command from the testing_env workspace and return its output to the agent.
 
     Commands are unrestricted within the operator's account — this is a red-team
     harness by design — but bounded by a timeout and an output cap. The operator
@@ -273,7 +274,7 @@ def _handle_run_bash(console: Console, tool_input: dict) -> str:
                 command,
                 shell=True,
                 executable=BASH_EXECUTABLE,
-                cwd=str(PROJECT_ROOT),
+                cwd=str(TESTING_ENV),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # merge so output keeps its real ordering
                 text=True,

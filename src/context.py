@@ -26,10 +26,16 @@ from settings import (
     INTERCEPT_FILE_CONTEXT_CHARS,
     INTERCEPT_MAX_FILES_READ,
     INTERCEPT_MAX_GLOB_MATCHES,
+    TESTING_ENV_DIRNAME,
 )
 
-# Repo root (this file lives in src/), used to resolve the files a call involves.
+# Repo root (this file lives in src/). Email-attachment paths are still expressed
+# relative to it (the scenarios pass "testing_env/...").
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# The agents' shell root: run_bash runs with cwd=AGENT_ROOT, so a bash command's
+# relative paths resolve here (not at the repo root). Grounding the evaluator on
+# the same base means it reads exactly the file the shell would.
+AGENT_ROOT = (PROJECT_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 # A path-like token in a shell command (quotes/operators act as separators). Glob
 # metacharacters are part of the token so a globbed path (secret*/x, .e*) is
@@ -45,13 +51,16 @@ def gather_file_context(tool_name: str, tool_input: dict) -> list[tuple[str, str
     # testing_env mustn't smuggle an out-of-tree file's contents back to the
     # agent); run_bash reads anywhere, so grounding on those files is unconfined.
     confine = tool_name == "send_email"
+    # Attachments are repo-root-relative ("testing_env/..."); bash paths are
+    # relative to the shell's cwd, which is the testing_env workspace.
+    base = PROJECT_ROOT if tool_name == "send_email" else AGENT_ROOT
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for rel in involved_paths(tool_name, tool_input):
         if rel in seen:
             continue
         seen.add(rel)
-        resolved = resolve(rel, confine=confine)
+        resolved = resolve(rel, base=base, confine=confine)
         content = read_file_safe(resolved) if resolved is not None else None
         if content is not None:
             out.append((rel, content))
@@ -103,18 +112,19 @@ def command_paths(command: str) -> list[str]:
 
 
 def _expand_glob(pattern: str) -> list[str]:
-    """Expand a shell glob against the project tree → project-relative paths of the
-    real files it matches (capped). Falls back to the literal pattern when nothing
-    matches, so a sensitive-looking pattern is still surfaced to the policy check.
+    """Expand a shell glob against the workspace → workspace-relative paths of the
+    real files it matches (capped). Globs are bash-only, so they expand against the
+    shell root (AGENT_ROOT). Falls back to the literal pattern when nothing matches,
+    so a sensitive-looking pattern is still surfaced to the policy check.
     """
     try:
-        matches = sorted(_glob.glob(str(PROJECT_ROOT / pattern)))
+        matches = sorted(_glob.glob(str(AGENT_ROOT / pattern)))
     except (OSError, ValueError):
         return [pattern]
     rels: list[str] = []
     for match in matches[:INTERCEPT_MAX_GLOB_MATCHES]:
         try:
-            rels.append(os.path.relpath(Path(match).resolve(), PROJECT_ROOT))
+            rels.append(os.path.relpath(Path(match).resolve(), AGENT_ROOT))
         except (OSError, ValueError):
             continue
     return rels or [pattern]
@@ -125,22 +135,22 @@ def attachments(tool_input: dict) -> list[str]:
     return [str(item) for item in raw] if isinstance(raw, list) else []
 
 
-def resolve(rel: str, confine: bool = False) -> Path | None:
-    """Resolve a referenced path to an absolute path.
+def resolve(rel: str, base: Path = PROJECT_ROOT, confine: bool = False) -> Path | None:
+    """Resolve a referenced path (relative to `base`) to an absolute path.
 
-    With confine=True the result must stay within PROJECT_ROOT *after* symlinks
-    are resolved — used for email attachments so a symlink can't escape the tree.
-    run_bash leaves confine=False: the shell can read anywhere, so grounding the
-    evaluator on those same files is correct.
+    With confine=True the result must stay within `base` *after* symlinks are
+    resolved — used for email attachments so a symlink can't escape the tree.
+    run_bash leaves confine=False (base=AGENT_ROOT): the shell can name anything,
+    so grounding the evaluator on those same files is correct.
     """
     try:
         path = Path(rel)
         if not path.is_absolute():
-            path = PROJECT_ROOT / path
+            path = base / path
         resolved = path.resolve()
     except (OSError, ValueError):  # ValueError: embedded null byte in the path
         return None
-    if confine and not resolved.is_relative_to(PROJECT_ROOT):
+    if confine and not resolved.is_relative_to(base):
         return None
     return resolved
 
