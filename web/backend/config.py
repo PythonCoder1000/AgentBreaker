@@ -7,9 +7,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 
-# Server.
+# Server. (8000 is commonly taken by other local dev servers; 8010 avoids the clash.)
 HOST = "127.0.0.1"
-PORT = 8000
+PORT = 8010
 
 # How long the engine waits for a human approve/deny on an escalation before it
 # defaults to deny — so a worker thread can't hang forever if the browser leaves.

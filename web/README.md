@@ -23,7 +23,7 @@ injected task *simultaneously*, and you watch their tool calls stream in real ti
    ```bash
    python web/serve.py
    ```
-4. Open <http://127.0.0.1:8000>.
+4. Open <http://127.0.0.1:8010> (set the port in `backend/config.py`).
 
 On startup the backend reseeds `testing_env/` (synthetic Helios-Chat product with
 decoy secrets) so every replay starts from the same state.
