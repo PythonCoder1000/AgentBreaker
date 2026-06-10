@@ -43,16 +43,22 @@ load_dotenv()
 
 # Active runs, keyed by (session_id, agent). Decisions look a run up here.
 RUNS: dict[tuple[str, str], "Run"] = {}
+# Persisted conversation history per (session_id, agent), so a session is a real
+# multi-turn chat: each new message continues from the stored messages.
+HISTORY: dict[tuple[str, str], list] = {}
 
 
 class Run:
-    """One agent running one scenario: a worker thread feeding an asyncio.Queue."""
+    """One agent turn: a worker thread feeding an asyncio.Queue, continuing the
+    session's stored history with `task` (the new user message)."""
 
-    def __init__(self, session: str, agent: str, scenario: scenarios.Scenario,
-                 loop: asyncio.AbstractEventLoop, api_key: str) -> None:
+    def __init__(self, session: str, agent: str, task: str, history: list,
+                 email_replies: list, loop: asyncio.AbstractEventLoop, api_key: str) -> None:
         self.session = session
         self.agent = agent
-        self.scenario = scenario
+        self.task = task
+        self.history = history
+        self.messages: list = []  # built by the engine; persisted on clean completion
         self.loop = loop
         self.queue: asyncio.Queue = asyncio.Queue()
         self.client = engine.anthropic.Anthropic(api_key=api_key)
@@ -60,7 +66,7 @@ class Run:
         self.intercept_ctx = InterceptContext() if agent == "breaker" else None
         # A throwaway console so the policy core's spinner/Live has somewhere to go.
         self.null_console = Console(file=io.StringIO(), force_terminal=False)
-        self._replies = list(scenario.email_replies)
+        self._replies = list(email_replies)
         self._pending: dict[str, threading.Event] = {}
         self._decisions: dict[str, bool] = {}
         # Set when the SSE client goes away: wakes any parked escalation and stops
@@ -112,6 +118,8 @@ class Run:
     def _execute(self) -> None:
         try:
             engine.run_agent(self)
+            if not self.stop.is_set() and self.messages:  # commit the turn to history
+                HISTORY[(self.session, self.agent)] = list(self.messages)
         except Exception as exc:  # never let a worker die silently
             self.emit("error", message=f"engine error: {exc!r}")
         finally:
@@ -138,12 +146,18 @@ async def list_scenarios() -> list[dict]:
 
 
 @app.get("/api/stream")
-async def stream(scenario: str, agent: str, session: str):
+async def stream(agent: str, session: str, scenario: str | None = None, message: str | None = None):
     if agent not in ("prompt", "breaker"):
         raise HTTPException(status_code=400, detail="agent must be 'prompt' or 'breaker'")
-    sc = scenarios.get_scenario(scenario)
-    if sc is None:
-        raise HTTPException(status_code=404, detail=f"unknown scenario {scenario!r}")
+    if message and message.strip():     # a free-text chat message wins over a preset
+        task, replies = message, []
+    elif scenario:
+        sc = scenarios.get_scenario(scenario)
+        if sc is None:
+            raise HTTPException(status_code=404, detail=f"unknown scenario {scenario!r}")
+        task, replies = sc.task, sc.email_replies
+    else:
+        raise HTTPException(status_code=400, detail="provide a message or a scenario")
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set")
@@ -152,7 +166,8 @@ async def stream(scenario: str, agent: str, session: str):
     previous = RUNS.get(key)
     if previous is not None:            # same session+agent reconnecting: stop the old one
         previous.cancel()
-    run = Run(session, agent, sc, asyncio.get_running_loop(), api_key)
+    history = HISTORY.get(key, [])      # continue the session's conversation
+    run = Run(session, agent, task, history, replies, asyncio.get_running_loop(), api_key)
     RUNS[key] = run
     run.start()
 
@@ -176,6 +191,22 @@ class Decision(BaseModel):
     agent: str
     call_id: str
     approve: bool
+
+
+class ResetRequest(BaseModel):
+    session: str
+
+
+@app.post("/api/reset")
+async def reset_session(req: ResetRequest) -> dict:
+    """Start a new conversation: stop any live runs and drop the stored history."""
+    for agent in ("prompt", "breaker"):
+        key = (req.session, agent)
+        run = RUNS.get(key)
+        if run is not None:
+            run.cancel()
+        HISTORY.pop(key, None)
+    return {"ok": True}
 
 
 @app.post("/api/decision")

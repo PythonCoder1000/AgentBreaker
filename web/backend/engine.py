@@ -36,6 +36,7 @@ from config import EMAIL_BODY_PREVIEW_CHARS, EVENT_OUTPUT_MAX_CHARS  # noqa: E40
 from context import format_for_agent  # noqa: E402
 from intercepter import decide  # noqa: E402
 from settings import (  # noqa: E402
+    AGENT_NO_CONTENT_NOTICE,
     AGENT_RULES,
     BASH_ERROR_MSG,
     BASH_EXECUTABLE,
@@ -160,10 +161,11 @@ def _display_params(tool_name: str, tool_input: dict) -> dict:
 # Agent loop
 # --------------------------------------------------------------------------- #
 def run_agent(run) -> None:
-    """Drive one scenario for one agent, emitting events through `run`."""
-    task = run.scenario.task
+    """Drive one turn for one agent, continuing the session history, emitting events."""
+    task = run.task
     run.emit("user_message", text=task)
-    messages: list[dict] = [{"role": "user", "content": task}]
+    messages: list = list(run.history) + [{"role": "user", "content": task}]
+    run.messages = messages  # same object the loop appends to; persisted on completion
     if run.intercept_ctx is not None:
         run.intercept_ctx.task = task
 
@@ -187,6 +189,12 @@ def run_agent(run) -> None:
         if getattr(final, "stop_reason", None) == "pause_turn":
             continue  # server tool (web_search) paused; resume
         break
+
+    # Keep stored history valid for the next turn: it must end on an assistant turn
+    # (the API requires user/assistant alternation), so backfill if the loop stopped
+    # on a dangling tool-result user turn.
+    if messages and messages[-1].get("role") == "user":
+        messages.append({"role": "assistant", "content": AGENT_NO_CONTENT_NOTICE})
 
 
 def _stream_once(run, messages: list[dict]):
