@@ -42,6 +42,7 @@ from config import (  # noqa: E402
     HOST,
     PORT,
     REPO_ROOT,
+    STATIC_CACHE_CONTROL,
 )
 import engine  # noqa: E402
 import scenarios  # noqa: E402
@@ -350,8 +351,23 @@ async def decision(payload: Decision) -> dict:
     return {"ok": True}
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """Serve the frontend assets with revalidation forced on every request.
+
+    Starlette's StaticFiles sends no Cache-Control, so browsers fall back to
+    heuristic caching and may keep running a stale ES module after an edit. We
+    set "no-cache" (revalidate, not "don't store") so the ETag still yields cheap
+    304s but a changed file is always picked up on reload.
+    """
+
+    async def get_response(self, path: str, scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = STATIC_CACHE_CONTROL
+        return response
+
+
 # Serve the frontend. Mounted last so the /api routes above take precedence.
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
 
 if __name__ == "__main__":

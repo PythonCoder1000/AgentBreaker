@@ -34,6 +34,11 @@ EMAIL_BODY_PREVIEW_CHARS = 600     # email-body preview inside a tool_call card
 # browser when the user clicks a file to read its contents.
 FILE_VIEW_MAX_BYTES = 256 * 1024
 
+# Cache-Control for the served frontend assets. "no-cache" means the browser
+# must revalidate before reuse (cheap ETag 304s) instead of heuristically
+# caching the ES modules — so a frontend edit actually shows up on reload.
+STATIC_CACHE_CONTROL = "no-cache"
+
 # Scripted client reply used once a scenario's own replies are exhausted (the
 # harness never sends real email; the "recipient reply" is always simulated).
 DEFAULT_EMAIL_REPLY = "Acknowledged, thanks."
