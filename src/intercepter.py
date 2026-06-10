@@ -130,27 +130,51 @@ def evaluate(
     an allow, file_context is the (path, content) list the context module loaded —
     handed back so the agent receives the same files (main appends them).
     """
+    decision, reason, file_context, _tier = decide(
+        client, console, context, tool_name, tool_input,
+        ask=lambda t, i, r: _ask_operator(console, t, i, r),
+    )
+    if decision == "block":
+        return _block(console, tool_name, tool_input, reason), []
+    _allow(console, tool_name, tool_input, reason)  # show the clean call too
+    return None, file_context  # allowed — hand the loaded files back for injection
+
+
+def decide(
+    client: anthropic.Anthropic,
+    console: Console,
+    context: InterceptContext,
+    tool_name: str,
+    tool_input: dict,
+    ask,
+) -> tuple[str, str, list[tuple[str, str]], str]:
+    """Run the policy tiers and return (decision, reason, file_context, tier).
+
+    decision is "allow" or "block". `ask(tool_name, tool_input, reason) -> bool` is
+    invoked for each escalation: returning False denies the call. This is the shared
+    policy core — the terminal `evaluate` renders the result as panels, the web demo
+    renders it as events; neither duplicates the tier ordering.
+    """
     # 1. Hard-logic blocks (instant; no disk I/O).
     reason = _hard_block(tool_name, tool_input)
     if reason:
-        return _block(console, tool_name, tool_input, reason), []
+        return "block", reason, [], "hard_block"
 
     # 2. Hard-logic escalations (instant; ask the operator).
     reason = _hard_escalation(tool_name, tool_input, context)
-    if reason and not _ask_operator(console, tool_name, tool_input, reason):
-        return _block(console, tool_name, tool_input, f"{INTERCEPT_DENIED_REASON} ({reason})"), []
+    if reason and not ask(tool_name, tool_input, reason):
+        return "block", f"{INTERCEPT_DENIED_REASON} ({reason})", [], "hard_escalation"
 
     # 3. Load the involved files (only now the deterministic tiers have cleared),
     #    then judge the call on their actual contents.
     file_context = gather_file_context(tool_name, tool_input)
-    decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input, file_context)
-    if decision == "block":
-        return _block(console, tool_name, tool_input, ai_reason or "failed AI policy review"), []
-    if decision == "escalate" and not _ask_operator(console, tool_name, tool_input, ai_reason or "flagged by AI policy"):
-        return _block(console, tool_name, tool_input, f"{INTERCEPT_DENIED_REASON} ({ai_reason})"), []
+    ai_decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input, file_context)
+    if ai_decision == "block":
+        return "block", ai_reason or "failed AI policy review", [], "ai"
+    if ai_decision == "escalate" and not ask(tool_name, tool_input, ai_reason or "flagged by AI policy"):
+        return "block", f"{INTERCEPT_DENIED_REASON} ({ai_reason})", [], "ai"
 
-    _allow(console, tool_name, tool_input, ai_reason)  # show the clean call too
-    return None, file_context  # allowed — hand the loaded files back for injection
+    return "allow", ai_reason, file_context, "ai"
 
 
 # --------------------------------------------------------------------------- #
