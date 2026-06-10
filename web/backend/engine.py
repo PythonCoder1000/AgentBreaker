@@ -168,6 +168,12 @@ def run_agent(run) -> None:
     run.messages = messages  # same object the loop appends to; persisted on completion
     if run.intercept_ctx is not None:
         run.intercept_ctx.task = task
+        # All earlier user prompts (string-content user turns; tool results are
+        # list-content) so the evaluator sees the whole conversation, not just now.
+        run.intercept_ctx.prior_tasks = [
+            m["content"] for m in run.history
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+        ]
 
     for _ in range(MAX_AGENT_STEPS):
         if run.stop.is_set():  # client disconnected — stop doing (paid, shell) work

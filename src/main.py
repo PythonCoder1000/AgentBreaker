@@ -611,6 +611,12 @@ def main() -> None:
         working = messages + [{"role": "user", "content": question}]
 
         if intercept_ctx is not None:  # fresh per-turn task for the evaluator
+            # Prior user prompts (string-content user turns) from the committed
+            # history, so the evaluator judges against the whole conversation.
+            intercept_ctx.prior_tasks = [
+                m["content"] for m in messages
+                if m.get("role") == "user" and isinstance(m.get("content"), str)
+            ]
             intercept_ctx.task = question
 
         try:
