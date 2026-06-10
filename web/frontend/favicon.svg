@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0b0e14"/>
+  <!-- Security shield (the "agent") being broken -->
+  <path d="M32 7l19 7v13c0 12-8 21-19 25-11-4-19-13-19-25V14z"
+        fill="none" stroke="#38bdf8" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Breaker bolt cracking through -->
+  <path d="M35 17 23 35h7l-3 13 13-18h-8z" fill="#fbbf24"/>
+</svg>
