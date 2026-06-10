@@ -3,11 +3,87 @@ import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
 import htm from "https://esm.sh/htm@3.1.1";
 
 const html = htm.bind(React.createElement);
+const e = React.createElement;
 const { useState, useEffect, useRef, useCallback } = React;
 
 const AGENTS = ["prompt", "breaker"];
 
-// ---- typewriter ------------------------------------------------------------
+// ---- minimal markdown (builds React nodes directly — no innerHTML/XSS) ------
+// Ordered so `code` and links win before emphasis. Asterisk emphasis only (what
+// Claude emits); avoids lookbehind so it parses on every browser.
+const INLINE_PATTERNS = [
+  { re: /`([^`]+)`/, build: (m, k) => e("code", { key: k }, m[1]) },
+  {
+    re: /\[([^\]]+)\]\(([^)\s]+)\)/,
+    build: (m, k) => {
+      const href = /^(https?:|mailto:)/i.test(m[2]) ? m[2] : "#";
+      return e("a", { key: k, href, target: "_blank", rel: "noopener noreferrer" }, inline(m[1]));
+    },
+  },
+  { re: /\*\*\*([^]+?)\*\*\*/, build: (m, k) => e("strong", { key: k }, e("em", null, inline(m[1]))) },
+  { re: /\*\*([^]+?)\*\*/, build: (m, k) => e("strong", { key: k }, inline(m[1])) },
+  { re: /\*([^*\n]+?)\*/, build: (m, k) => e("em", { key: k }, inline(m[1])) },
+];
+
+function inline(text) {
+  const out = [];
+  let buf = text;
+  let key = 0;
+  while (buf) {
+    let best = null;
+    for (const p of INLINE_PATTERNS) {
+      const m = p.re.exec(buf);
+      if (m && (best === null || m.index < best.m.index)) best = { p, m };
+    }
+    if (!best) { out.push(buf); break; }
+    if (best.m.index > 0) out.push(buf.slice(0, best.m.index));
+    out.push(best.p.build(best.m, "x" + key++));
+    buf = buf.slice(best.m.index + best.m[0].length);
+  }
+  return out;
+}
+
+function renderMarkdown(text) {
+  const lines = (text || "").split("\n");
+  const blocks = [];
+  let i = 0;
+  let key = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {                       // fenced code block
+      const code = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
+      i++; // skip closing fence
+      blocks.push(e("pre", { key: key++, className: "md-pre" }, e("code", null, code.join("\n"))));
+      continue;
+    }
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);          // heading
+    if (h) { blocks.push(e("h" + Math.min(h[1].length + 2, 6), { key: key++ }, inline(h[2]))); i++; continue; }
+    if (!line.trim()) { i++; continue; }               // blank → paragraph break
+    if (/^\s*[-*+]\s+/.test(line)) {                   // unordered list
+      const items = [];
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*+]\s+/, "")); i++; }
+      blocks.push(e("ul", { key: key++ }, items.map((it, idx) => e("li", { key: idx }, inline(it)))));
+      continue;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {                   // ordered list
+      const items = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, "")); i++; }
+      blocks.push(e("ol", { key: key++ }, items.map((it, idx) => e("li", { key: idx }, inline(it)))));
+      continue;
+    }
+    const para = [];                                   // paragraph (joined with <br>)
+    while (i < lines.length && lines[i].trim() &&
+           !/^\s*(```|[-*+]\s+|\d+\.\s+|#{1,6}\s+)/.test(lines[i])) { para.push(lines[i]); i++; }
+    const kids = [];
+    para.forEach((p, idx) => { if (idx) kids.push(e("br", { key: "br" + idx })); inline(p).forEach((n) => kids.push(n)); });
+    blocks.push(e("p", { key: key++ }, kids));
+  }
+  return blocks;
+}
+
+// ---- typewriter (reveals text, rendering markdown as it goes) ---------------
 function Typewriter({ text, speed = 10 }) {
   const [n, setN] = useState(0);
   useEffect(() => {
@@ -21,7 +97,7 @@ function Typewriter({ text, speed = 10 }) {
     }, speed);
     return () => clearInterval(id);
   }, [text]);
-  return html`<span>${text.slice(0, n)}</span>`;
+  return e("div", { className: "md" }, renderMarkdown(text.slice(0, n)));
 }
 
 // ---- one tool call's parameters -------------------------------------------
@@ -120,7 +196,7 @@ function FeedItem({ ev, isLast, resolved, onDecide }) {
 }
 
 // ---- one agent column ------------------------------------------------------
-function Column({ kind, title, expect, events, onDecide }) {
+function Column({ kind, title, events, onDecide }) {
   const feedRef = useRef(null);
   useEffect(() => {
     const el = feedRef.current;
@@ -138,7 +214,6 @@ function Column({ kind, title, expect, events, onDecide }) {
     <div class="column-head">
       <span class="tag"></span>
       <h2>${title}</h2>
-      <span class="expect">${expect}</span>
     </div>
     <div class="feed" ref=${feedRef}>
       ${events.length === 0
@@ -260,10 +335,8 @@ function App() {
 
     <div class="columns">
       <${Column} kind="prompt" title="Prompt Agent"
-        expect=${current ? current.expected_prompt : ""}
         events=${feeds.prompt} onDecide=${onDecide} />
       <${Column} kind="breaker" title="Breaker Agent"
-        expect=${current ? current.expected_breaker : ""}
         events=${feeds.breaker} onDecide=${onDecide} />
     </div>
   </div>`;
