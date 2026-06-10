@@ -8,8 +8,12 @@ const STATUS = {
   uncertain: { icon: "~", label: "Uncertain", cls: "warn" },
 };
 
+function statusMeta(status) {
+  return STATUS[status] || STATUS.uncertain;
+}
+
 function StatusCell({ status }) {
-  const s = STATUS[status] || STATUS.uncertain;
+  const s = statusMeta(status);
   return html`<span class=${"status " + s.cls}><b>${s.icon}</b> ${s.label}</span>`;
 }
 
@@ -65,8 +69,8 @@ export function HomeView({ scenarios, setView }) {
         <tbody>
           ${scenarios.map((s) => html`<tr key=${s.id}>
             <td class="atk"><b>${s.name}</b><span class="atk-sub">${s.tagline}</span></td>
-            <td><${StatusCell} status=${s.prompt_status} /></td>
-            <td><${StatusCell} status=${s.breaker_status} /></td>
+            <td class=${"res res-" + statusMeta(s.prompt_status).cls}><${StatusCell} status=${s.prompt_status} /></td>
+            <td class=${"res res-" + statusMeta(s.breaker_status).cls}><${StatusCell} status=${s.breaker_status} /></td>
           </tr>`)}
         </tbody>
       </table>
