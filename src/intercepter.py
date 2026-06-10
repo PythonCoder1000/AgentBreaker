@@ -33,10 +33,13 @@ import re
 from dataclasses import dataclass
 
 import anthropic
+from rich import box
 from rich.console import Console
 from rich.live import Live
 from rich.padding import Padding
+from rich.panel import Panel
 from rich.spinner import Spinner
+from rich.table import Table
 from rich.text import Text
 
 from context import attachments, command_paths, gather_file_context
@@ -49,17 +52,23 @@ from settings import (
     BASH_BLOCK_PATTERNS,
     BASH_ESCALATE_PATTERNS,
     BASH_PATH_BLOCK_PATTERNS,
+    COLOR_ALLOW,
+    COLOR_BLOCK,
+    COLOR_DIM,
+    COLOR_ESCALATE,
     COMPANY_DOMAIN,
     EMAIL_ADDRESS_RE,
     EMAIL_BODY_BLOCK_PATTERNS,
+    ESCALATE_APPROVE_INPUTS,
+    ESCALATE_APPROVE_LABEL,
+    ESCALATE_BLOCK_LABEL,
+    ESCALATE_CHOICE_PROMPT,
     ESCALATE_MAX_TOOL_CALLS_PER_TURN,
     INTERCEPT_AI_MAX_TOKENS,
     INTERCEPT_AI_MODEL,
     INTERCEPT_AI_SYSTEM,
     INTERCEPT_BLOCK_TEMPLATE,
     INTERCEPT_DENIED_REASON,
-    INTERCEPT_ESCALATE_PROMPT,
-    INTERCEPT_ESCALATE_TEMPLATE,
     INTERCEPT_FAIL_OPEN,
     INTERCEPT_REVIEW_LABEL,
     LIVE_REFRESH_PER_SECOND,
@@ -67,8 +76,24 @@ from settings import (
     MAX_EMAIL_RECIPIENTS,
     RESULT_PREFIX,
     SPINNER_STYLE,
-    TOOL_BULLET,
+    VERDICT_ALLOW_GLYPH,
+    VERDICT_ALLOW_LABEL,
+    VERDICT_BLOCK_TITLE,
+    VERDICT_ESCALATE_TITLE,
+    VERDICT_REASON_LABEL,
+    VERDICT_SUMMARY_MAX,
+    VERDICT_TARGET_LABEL,
+    VERDICT_TOOL_LABEL,
 )
+
+# Strip control bytes (incl. ESC) from model-supplied text before it is rendered —
+# rich does not strip ESC, so an untrusted command/recipient could otherwise drive
+# the terminal. (main has its own copy; intercepter can't import it without a cycle.)
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe(text: object) -> str:
+    return _CONTROL_CHARS.sub("", str(text))
 
 # Pre-compile the command-pattern lists once. Case-insensitive so a secret can't
 # be reached by varying case (e.g. .ENV, Credentials.txt) on a case-insensitive FS.
@@ -108,47 +133,114 @@ def evaluate(
     # 1. Hard-logic blocks (instant; no disk I/O).
     reason = _hard_block(tool_name, tool_input)
     if reason:
-        return _block(console, tool_name, reason), []
+        return _block(console, tool_name, tool_input, reason), []
 
     # 2. Hard-logic escalations (instant; ask the operator).
     reason = _hard_escalation(tool_name, tool_input, context)
-    if reason and not _ask_operator(console, reason):
-        return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({reason})"), []
+    if reason and not _ask_operator(console, tool_name, tool_input, reason):
+        return _block(console, tool_name, tool_input, f"{INTERCEPT_DENIED_REASON} ({reason})"), []
 
     # 3. Load the involved files (only now the deterministic tiers have cleared),
     #    then judge the call on their actual contents.
     file_context = gather_file_context(tool_name, tool_input)
     decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input, file_context)
     if decision == "block":
-        return _block(console, tool_name, ai_reason or "failed AI policy review"), []
-    if decision == "escalate" and not _ask_operator(console, ai_reason or "flagged by AI policy"):
-        return _block(console, tool_name, f"{INTERCEPT_DENIED_REASON} ({ai_reason})"), []
+        return _block(console, tool_name, tool_input, ai_reason or "failed AI policy review"), []
+    if decision == "escalate" and not _ask_operator(console, tool_name, tool_input, ai_reason or "flagged by AI policy"):
+        return _block(console, tool_name, tool_input, f"{INTERCEPT_DENIED_REASON} ({ai_reason})"), []
 
+    _allow(console, tool_name, tool_input, ai_reason)  # show the clean call too
     return None, file_context  # allowed — hand the loaded files back for injection
 
 
 # --------------------------------------------------------------------------- #
-# Operator-facing helpers
+# Operator-facing helpers — the policy verdict UI
 # --------------------------------------------------------------------------- #
-def _block(console: Console, tool_name: str, reason: str) -> str:
-    """Print a block line and return the message the agent sees as its result."""
+def _call_summary(tool_name: str, tool_input: dict) -> str:
+    """A one-line 'what this call does' for the verdict panels (recipient / command)."""
+    if tool_name == "send_email":
+        summary = f"→ {tool_input.get('email', '') or '(no recipient)'}"
+    elif tool_name == "run_bash":
+        summary = f"$ {str(tool_input.get('command', '')).strip()}"
+    else:
+        summary = ""
+    summary = _safe(summary)
+    if len(summary) > VERDICT_SUMMARY_MAX:
+        summary = summary[: VERDICT_SUMMARY_MAX - 1] + "…"
+    return summary
+
+
+def _verdict_rows(tool_name: str, tool_input: dict, reason: str) -> Table:
+    """A labelled Tool / Target / Reason grid for the block & escalate panels."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style=COLOR_DIM, no_wrap=True)
+    grid.add_column(overflow="fold")
+    grid.add_row(VERDICT_TOOL_LABEL, Text(_safe(tool_name), style="bold"))
+    summary = _call_summary(tool_name, tool_input)
+    if summary:
+        grid.add_row(VERDICT_TARGET_LABEL, summary)
+    if reason:
+        grid.add_row(VERDICT_REASON_LABEL, Text(_safe(reason), style="bold"))
+    return grid
+
+
+def _block(console: Console, tool_name: str, tool_input: dict, reason: str) -> str:
+    """Print a loud, boxed BLOCKED verdict; return the message the agent sees."""
     message = INTERCEPT_BLOCK_TEMPLATE.format(reason=reason)
     console.print()
-    console.print(Text(f"{TOOL_BULLET} {tool_name} (blocked)", style="yellow"))
-    console.print(Text(f"{RESULT_PREFIX}{message}", style="red"))
+    console.print(
+        Panel(
+            _verdict_rows(tool_name, tool_input, reason),
+            title=Text(VERDICT_BLOCK_TITLE, style=f"bold white on {COLOR_BLOCK}"),
+            title_align="left",
+            border_style=f"bold {COLOR_BLOCK}",
+            box=box.DOUBLE,
+            expand=False,
+            padding=(0, 2),
+        )
+    )
     return message
 
 
-def _ask_operator(console: Console, reason: str) -> bool:
-    """Pause and ask the operator to approve an escalated action (default: no)."""
+def _ask_operator(console: Console, tool_name: str, tool_input: dict, reason: str) -> bool:
+    """Show an interactive ESCALATION panel and ask the operator to approve (default: no)."""
     console.print()
-    console.print(Text(INTERCEPT_ESCALATE_TEMPLATE.format(reason=reason), style="yellow"))
+    console.print(
+        Panel(
+            _verdict_rows(tool_name, tool_input, reason),
+            title=Text(VERDICT_ESCALATE_TITLE, style=f"bold black on {COLOR_ESCALATE}"),
+            title_align="left",
+            border_style=f"bold {COLOR_ESCALATE}",
+            box=box.HEAVY,
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    options = Text("   ")
+    options.append(ESCALATE_APPROVE_LABEL, style=f"bold {COLOR_ALLOW}")
+    options.append("     ")
+    options.append(ESCALATE_BLOCK_LABEL, style=f"bold {COLOR_BLOCK}")
+    console.print(options)
     try:
-        answer = input(INTERCEPT_ESCALATE_PROMPT).strip().lower()
+        answer = input(ESCALATE_CHOICE_PROMPT).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-    return answer in {"y", "yes"}
+    return answer in ESCALATE_APPROVE_INPUTS
+
+
+def _allow(console: Console, tool_name: str, tool_input: dict, reason: str) -> None:
+    """Print a light green ALLOWED line so the normal (clean) flow is visible too."""
+    line = Text()
+    line.append(f"{VERDICT_ALLOW_GLYPH} {VERDICT_ALLOW_LABEL}", style=f"bold {COLOR_ALLOW}")
+    line.append(f"  {_safe(tool_name)}", style="bold")
+    summary = _call_summary(tool_name, tool_input)
+    if summary:
+        line.append(f"   {summary}", style=COLOR_DIM)
+    if reason:
+        line.append(f"   — {_safe(reason)}", style=COLOR_DIM)
+    console.print()
+    console.print(line)
 
 
 # --------------------------------------------------------------------------- #

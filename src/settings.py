@@ -268,6 +268,15 @@ RESULT_PREFIX = "  ⎿ "
 EMAIL_BULLET = "✉"
 ATTACHMENT_BULLET = "📎"  # marks attachment lines in the email panel
 
+# --- Color palette (rich style strings) ------------------------------------
+# One place for the whole UI so the look stays consistent. Tweak here to retheme.
+COLOR_TOOL = "cyan"          # tool-call accents (the ⏺ bullet, tool names)
+COLOR_DIM = "grey50"         # secondary / metadata text
+COLOR_ALLOW = "green"        # a tool call the policy allowed
+COLOR_ESCALATE = "yellow"    # a tool call awaiting human approval
+COLOR_BLOCK = "red"          # a tool call the policy blocked
+COLOR_BANNER = "bold cyan"   # startup banner, section headings, agent name
+
 # Shown when a turn hits the MAX_AGENT_STEPS tool-loop cap.
 AGENT_STEP_LIMIT_NOTICE = "[stopped — reached the tool-step limit]"
 # Placeholder assistant turn appended when the model returns no content after a
@@ -281,11 +290,25 @@ AGENT_NO_CONTENT_NOTICE = "[no further response]"
 #   3) AI semantic blocks   4) AI escalations   (3 & 4 share one Claude call)
 # All concrete values (patterns, thresholds, the evaluator prompt) live here.
 
-# How blocks / escalations are reported to the agent and operator.
+# How a block is reported back to the agent (the tool-result string it sees).
 INTERCEPT_BLOCK_TEMPLATE = "Command Blocked: {reason}"
-INTERCEPT_ESCALATE_TEMPLATE = "[escalation] {reason}"
-INTERCEPT_ESCALATE_PROMPT = "Allow this action? [y/N]: "
 INTERCEPT_DENIED_REASON = "denied by operator"
+
+# Policy-verdict panels shown to the operator. Three clearly-distinct states so an
+# audience reads the flow at a glance: a loud boxed BLOCK, an interactive ESCALATE
+# with approve/block options, and a light green ALLOW line for clean calls.
+VERDICT_TOOL_LABEL = "Tool"
+VERDICT_TARGET_LABEL = "Target"
+VERDICT_REASON_LABEL = "Reason"
+VERDICT_SUMMARY_MAX = 120          # truncate a long command / recipient summary
+VERDICT_BLOCK_TITLE = " 🚨  BLOCKED "
+VERDICT_ESCALATE_TITLE = " ⚠  ESCALATION — human approval required "
+VERDICT_ALLOW_GLYPH = "✓"
+VERDICT_ALLOW_LABEL = "ALLOWED"
+ESCALATE_APPROVE_LABEL = "[ A ] Approve"
+ESCALATE_BLOCK_LABEL = "[ B ] Block"
+ESCALATE_CHOICE_PROMPT = "Your choice [A/B]: "
+ESCALATE_APPROVE_INPUTS = {"a", "approve", "y", "yes"}  # anything else = block
 # If the AI evaluator errors or its output can't be parsed, allow (True) or
 # block (False) the call. Hard-logic rules still apply either way.
 INTERCEPT_FAIL_OPEN = True
