@@ -426,18 +426,59 @@ BASH_ESCALATE_PATTERNS = [
     (r"\b(curl|wget)\b", "network egress (curl/wget)"),
 ]
 
-# -- Bash: auto-allow (skip the AI review) --
-# Pure read-only listing/search commands that locate files without reading their
-# *contents*, mutating, chaining, redirecting, or executing. These are allowed
-# instantly — no AI policy call. The deterministic blocks above still run first,
-# so a path under secrets/ or .env is denied before it gets here.
-BASH_AUTO_ALLOW_COMMANDS = ("ls", "find", "tree", "pwd", "stat", "realpath", "dirname", "basename")
-# Any of these shell control characters disqualifies auto-allow — they could chain
-# to, pipe into, or redirect a command that reads contents or changes files.
-BASH_AUTO_ALLOW_FORBIDDEN_CHARS = "|;&<>`$(){}\n"
-# find actions that execute commands, delete, or write files — disqualify too.
-BASH_AUTO_ALLOW_FORBIDDEN_TOKENS = ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fls", "-fprintf")
-BASH_AUTO_ALLOW_REASON = "read-only file listing/search"
+# -- Bash: auto-allow fast-path (skip the AI review) --
+# A layered allowlist for read-only metadata/info commands (see intercepter
+# ._bash_auto_allow). It is an OPTIMIZATION, never the security boundary: anything
+# that doesn't match every layer falls through to the deterministic + AI checks.
+# Default-deny by construction — any doubt routes to the full evaluator.
+
+# Layer 6: a command longer than this skips auto-approve (length suggests
+# obfuscation; legitimate metadata calls are short).
+BASH_AUTO_ALLOW_MAX_LEN = 500
+
+# Layer 0: shell metacharacters / glob / quoting tricks. Any of these in the raw
+# command string disqualifies auto-approve — they can chain, pipe, redirect,
+# substitute, expand variables, glob to unexpected paths, or hide intent.
+BASH_AUTO_ALLOW_FORBIDDEN_CHARS = ";&|<>`$(){}[]*?#~\\\n\r"
+
+# Layer 2: the ONLY programs eligible for auto-approve — system/environment info
+# and file-metadata commands that never read file contents (except wc, guarded by
+# the path layer). The first token must be exactly one of these.
+BASH_AUTO_ALLOW_COMMANDS = (
+    "pwd", "whoami", "id", "date", "hostname", "uname",   # system / environment info
+    "ls", "tree", "stat", "file", "wc", "du", "df", "find", "echo",  # file metadata
+)
+
+# Layer 1: wrapper programs that execute another program — never auto-approved,
+# even though they aren't in the allowlist (explicit defense in depth).
+BASH_AUTO_ALLOW_WRAPPERS = (
+    "env", "xargs", "time", "nice", "watch", "sudo", "su", "timeout",
+    "nohup", "command", "exec", "eval", "bash", "sh", "zsh",
+)
+
+# Layer 1: an absolute-path program is only OK if it lives in a real system bin
+# directory (so /bin/ls is fine, /tmp/ls is not).
+BASH_SYSTEM_BIN_DIRS = ("/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin")
+
+# Layer 3: find actions that execute commands, delete, or write files, or follow
+# symlinks (`-follow` is a synonym for `-L`) — disqualify. (-printf is handled
+# separately: any -printf routes to the evaluator.)
+BASH_AUTO_ALLOW_FORBIDDEN_TOKENS = (
+    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fls", "-fprintf", "-follow",
+)
+
+# Layer 3: flags that dereference symlinks (could follow a link outside the
+# workspace) disqualify auto-approve for any allowlisted command.
+BASH_AUTO_ALLOW_DEREF_FLAGS = ("-L", "-H", "--dereference", "--dereference-args")
+# tree follows symlinks on its lowercase -l (its -L is max-depth, not follow), so
+# a short flag carrying 'l' disqualifies `tree` specifically.
+BASH_AUTO_ALLOW_TREE_FOLLOW_SHORT = "l"
+
+# Layer 4: even for metadata, a path touching one of these (case-insensitive
+# substring) routes to the evaluator rather than auto-approving.
+BASH_AUTO_ALLOW_SENSITIVE = ("secrets", "credentials", ".env")
+
+BASH_AUTO_ALLOW_REASON = "auto-approved: read-only metadata command"
 
 # -- AI semantic evaluator (one Claude call covering all semantic rules) --
 INTERCEPT_AI_MODEL = "claude-sonnet-4-6"

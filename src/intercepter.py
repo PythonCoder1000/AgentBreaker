@@ -31,7 +31,9 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import anthropic
 from rich import box
@@ -43,7 +45,7 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
-from context import attachments, command_paths, gather_file_context, workspace_tree
+from context import AGENT_ROOT, attachments, command_paths, gather_file_context, workspace_tree
 from settings import (
     ATTACHMENT_BLOCKED_BASENAMES,
     ATTACHMENT_BLOCKED_COMPONENTS,
@@ -51,9 +53,15 @@ from settings import (
     ATTACHMENT_BLOCKED_SUFFIXES,
     ATTACHMENTS_ROOT,
     BASH_AUTO_ALLOW_COMMANDS,
+    BASH_AUTO_ALLOW_DEREF_FLAGS,
     BASH_AUTO_ALLOW_FORBIDDEN_CHARS,
     BASH_AUTO_ALLOW_FORBIDDEN_TOKENS,
+    BASH_AUTO_ALLOW_MAX_LEN,
     BASH_AUTO_ALLOW_REASON,
+    BASH_AUTO_ALLOW_SENSITIVE,
+    BASH_AUTO_ALLOW_TREE_FOLLOW_SHORT,
+    BASH_AUTO_ALLOW_WRAPPERS,
+    BASH_SYSTEM_BIN_DIRS,
     BASH_BLOCK_PATTERNS,
     BASH_ESCALATE_PATTERNS,
     BASH_PATH_BLOCK_PATTERNS,
@@ -336,23 +344,117 @@ def _attachment_blocked(path: str) -> str | None:
 
 
 def _bash_auto_allow(command: str) -> bool:
-    """Whether a command is a pure read-only listing/search, safe to allow instantly.
+    """Whether a run_bash command qualifies for the auto-approve fast-path.
 
-    Requires: the first word is a safe lister (ls/find/...), the command has no
-    shell control characters (so it can't chain, pipe, redirect, or substitute),
-    and — for find — no action that executes, deletes, or writes. Anything else
-    falls through to the AI review, so this only ever *adds* allows, never blocks.
+    A layered, default-deny check: the command must be a single bare invocation of
+    an allowlisted read-only metadata/info program, free of shell metacharacters,
+    dangerous flags, and out-of-workspace or sensitive paths. ANY doubt — a parse
+    failure or an exception — returns False, so the command goes to the full
+    deterministic + AI evaluation. This is an optimization, never the security
+    boundary, so it only ever *adds* fast allows, never blocks.
     """
-    cmd = command.strip()
-    if not cmd:
+    try:
+        return _auto_allow_ok(command)
+    except Exception:
+        return False  # Layer 6: never silently allow on an internal error
+
+
+def _auto_allow_ok(command: str) -> bool:
+    # Layer 6: empty / whitespace-only / over-long → evaluate.
+    if not command or not command.strip():
         return False
-    if any(ch in cmd for ch in BASH_AUTO_ALLOW_FORBIDDEN_CHARS):
+    if len(command) > BASH_AUTO_ALLOW_MAX_LEN:
         return False
-    lowered = cmd.lower()
-    if any(token in lowered for token in BASH_AUTO_ALLOW_FORBIDDEN_TOKENS):
+
+    # Layer 0: any shell metacharacter, glob, or quoting trick on the RAW string.
+    if any(ch in command for ch in BASH_AUTO_ALLOW_FORBIDDEN_CHARS):
         return False
-    verb = cmd.split()[0].rsplit("/", 1)[-1]  # tolerate a leading path like /bin/ls
-    return verb in BASH_AUTO_ALLOW_COMMANDS
+
+    # Tokenize; a parse failure (e.g. unbalanced quotes) → evaluate.
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+
+    # Layer 1 + 2: exactly one bare invocation of an allowlisted program.
+    verb = _auto_allow_program(tokens[0])
+    if verb is None:
+        return False
+    args = tokens[1:]
+
+    # Layer 3: per-command dangerous-flag constraints.
+    if not _auto_allow_args_ok(verb, args):
+        return False
+
+    # Layer 4: every non-flag argument must stay inside the workspace and avoid
+    # sensitive targets. (echo's literal text is path-checked too, which only ever
+    # errs toward evaluation — never toward a false allow.)
+    for arg in args:
+        if arg.startswith("-"):
+            continue
+        if not _auto_allow_path_ok(arg):
+            return False
+
+    return True
+
+
+def _auto_allow_program(token: str) -> str | None:
+    """The allowlisted program name if `token` is a bare or system-bin invocation
+    of one, else None. Rejects wrappers (env/xargs/sudo/...) and any absolute or
+    relative path that isn't a system binary (so /bin/ls is fine, /tmp/ls is not).
+    """
+    if "/" in token:
+        prog = Path(token)
+        if prog.parent.as_posix() not in BASH_SYSTEM_BIN_DIRS:
+            return None
+        name = prog.name
+    else:
+        name = token
+    if name in BASH_AUTO_ALLOW_WRAPPERS:
+        return None
+    if name not in BASH_AUTO_ALLOW_COMMANDS:
+        return None
+    return name
+
+
+def _auto_allow_args_ok(verb: str, args: list[str]) -> bool:
+    """Layer 3: reject symlink-dereference flags for any command, find actions that
+    execute/delete/write/follow, and tree's lowercase -l (follow symlinks)."""
+    for arg in args:
+        if arg in BASH_AUTO_ALLOW_DEREF_FLAGS:
+            return False
+        if arg.startswith("-") and not arg.startswith("--") and "L" in arg:
+            return False  # a combined short flag carrying -L (e.g. -lL)
+    if verb == "find":
+        for arg in args:
+            low = arg.lower()
+            if low in BASH_AUTO_ALLOW_FORBIDDEN_TOKENS or low.startswith("-printf"):
+                return False
+    if verb == "tree":
+        for arg in args:
+            if arg.startswith("-") and not arg.startswith("--") and BASH_AUTO_ALLOW_TREE_FOLLOW_SHORT in arg:
+                return False  # tree -l follows symlinks (could escape the workspace)
+    return True
+
+
+def _auto_allow_path_ok(arg: str) -> bool:
+    """Layer 4: a path argument must resolve inside the workspace and not touch a
+    sensitive target. Symlinks are followed (resolve), so a link out of the tree
+    is rejected. Non-path literals (echo text) pass unless they look sensitive or
+    out-of-tree, in which case erring toward evaluation is fine."""
+    norm = arg.replace("\\", "/")
+    if arg.startswith("~") or ".." in norm.split("/"):  # no home / parent traversal
+        return False
+    if any(s in norm.lower() for s in BASH_AUTO_ALLOW_SENSITIVE):  # sensitive → evaluate
+        return False
+    try:
+        path = Path(arg)
+        resolved = (path if path.is_absolute() else AGENT_ROOT / path).resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == AGENT_ROOT or resolved.is_relative_to(AGENT_ROOT)
 
 
 def _bash_hard_block(tool_input: dict) -> str | None:
