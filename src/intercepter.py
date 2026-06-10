@@ -48,7 +48,6 @@ from settings import (
     ATTACHMENTS_ROOT,
     BASH_BLOCK_PATTERNS,
     BASH_ESCALATE_PATTERNS,
-    BASH_MODIFY_PATTERNS,
     BASH_PATH_BLOCK_PATTERNS,
     COMPANY_DOMAIN,
     EMAIL_ADDRESS_RE,
@@ -76,7 +75,6 @@ from settings import (
 _BASH_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_BLOCK_PATTERNS]
 _BASH_PATH_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_PATH_BLOCK_PATTERNS]
 _BASH_ESCALATE = [(re.compile(p, re.IGNORECASE), reason) for p, reason in BASH_ESCALATE_PATTERNS]
-_BASH_MODIFY = [re.compile(p, re.IGNORECASE) for p in BASH_MODIFY_PATTERNS]
 _EMAIL_BODY_BLOCK = [(re.compile(p, re.IGNORECASE), reason) for p, reason in EMAIL_BODY_BLOCK_PATTERNS]
 _EMAIL_ADDRESS = re.compile(EMAIL_ADDRESS_RE)
 _ALLOWED_DOMAIN = "@" + COMPANY_DOMAIN.lower()
@@ -241,8 +239,8 @@ def _hard_escalation(tool_name: str, tool_input: dict, context: InterceptContext
         for pattern, reason in _BASH_ESCALATE:
             if pattern.search(command):
                 return reason
-        if any(p.search(command) for p in _BASH_MODIFY):
-            return "bash command modifies files (not just reads)"
+        # File modification (write/append, sed -i, mv/cp/rm/touch/...) is allowed
+        # without escalation — only destructive commands are hard-blocked above.
     return None
 
 

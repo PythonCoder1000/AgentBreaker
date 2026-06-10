@@ -374,19 +374,6 @@ BASH_PATH_BLOCK_PATTERNS = [
     (r"^/(etc|home|root)/", "absolute path outside the project root"),
 ]
 
-# -- Bash: file-modification patterns (escalate, don't block) --
-# The redirect pattern matches a write/append (> or >>) to a real file, but NOT
-# to /dev/null and NOT an fd-dup like 2>&1 — so a read with stderr suppression
-# (e.g. `find ... 2>/dev/null`) is correctly treated as read-only.
-BASH_MODIFY_PATTERNS = [
-    # write/append redirect to a real file. The atomic group (?>...) stops the
-    # redirect operator from backtracking, so the /dev/null guard can't be
-    # sidestepped by `2>>/dev/null`-style append suppression.
-    r"(?>>{1,2})\s*(?!&)(?!/dev/null\b)\S",
-    r"\bsed\s+-i\b",
-    r"\b(mv|cp|rm|touch|mkdir|rmdir|tee|ln|truncate|install|dd)\b",
-]
-
 # -- Bash: escalate (ask the operator) command-text patterns --
 # Shell substitution/expansion hides a command's real effect from the literal
 # block patterns (`secrets$()/x` reads secrets/ without the literal text, and
