@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover — present on macOS/Linux CPython
 
 import anthropic
 from dotenv import load_dotenv
+from rich import box
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -52,6 +53,9 @@ from settings import (
     BASH_TIMEOUT_SECONDS,
     BASH_TRUNCATED_NOTE,
     CLIENT_PREFIX,
+    COLOR_BANNER,
+    COLOR_DIM,
+    COLOR_TOOL,
     CONTACTS,
     CONTACTS_DIRECTORY_HEADER,
     EMAIL_ATTACHED_CLAUSE,
@@ -149,7 +153,11 @@ def _build_system_prompt(include_rules: bool) -> str:
 
 def _tool_line(query: str) -> Text:
     """A web_search invocation as a Claude-CLI-style line (literal, no markup)."""
-    return Text(f'{TOOL_BULLET} web_search("{_sanitize(query)}")')
+    line = Text()
+    line.append(TOOL_BULLET, style=COLOR_TOOL)
+    line.append(" web_search", style="bold")
+    line.append(f'("{_sanitize(query)}")', style=COLOR_DIM)
+    return line
 
 
 def _result_count(block: object) -> int | None:
@@ -241,8 +249,11 @@ def _handle_run_bash(console: Console, tool_input: dict) -> str:
     # The "tool call" header (bullet + echoed command) appears first and stays put;
     # only the line beneath it changes — a live spinner while the command runs, then
     # the result (exit code + output) replaces the spinner in place once it finishes.
-    call_line = Text(f"{TOOL_BULLET} run_bash")
-    cmd_line = Text(f"{RESULT_PREFIX}$ {_sanitize(command)}")
+    call_line = Text()
+    call_line.append(TOOL_BULLET, style=COLOR_TOOL)
+    call_line.append(" run_bash", style="bold")
+    cmd_line = Text(RESULT_PREFIX, style=COLOR_DIM)
+    cmd_line.append(f"$ {_sanitize(command)}")
 
     def frame(*tail: object) -> Group:
         return Group(call_line, cmd_line, *tail)
@@ -333,9 +344,11 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     console.print(
         Panel(
             Group(*body),
-            title=Text(f"{EMAIL_BULLET} Email → {email}", style="bold cyan"),
+            title=Text(f"{EMAIL_BULLET}  Email → {email}", style=COLOR_BANNER),
             title_align="left",
-            border_style="cyan",
+            border_style=COLOR_TOOL,
+            box=box.ROUNDED,
+            padding=(0, 1),
         )
     )
     try:
@@ -390,7 +403,7 @@ def stream_turn(
         def render() -> Group:
             body: list = list(tool_lines)
             if streaming:
-                body.append(Text(AGENT_PREFIX, style="bold"))
+                body.append(Text(AGENT_PREFIX, style=COLOR_BANNER))
                 body.append(Markdown(_sanitize_block("".join(seg_text))))
             elif busy:
                 body.append(Spinner(SPINNER_STYLE, text=Text(f"{AGENT_PREFIX}{label}")))
@@ -422,7 +435,7 @@ def stream_turn(
                             elif block.type == "web_search_tool_result":
                                 n = _result_count(block)
                                 if n is not None:
-                                    tool_lines.append(Text(f"{RESULT_PREFIX}{n} results"))
+                                    tool_lines.append(Text(f"{RESULT_PREFIX}{n} results", style=COLOR_DIM))
                                 label = THINKING_LABEL
                             elif block.type == "tool_use" and name == "send_email":
                                 label = EMAIL_LABEL
@@ -519,10 +532,25 @@ def stream_turn(
 
 def _select_version(console: Console) -> str:
     """Render the startup version menu and return the chosen version key."""
+    menu = Text()
+    for i, entry in enumerate(VERSIONS):
+        if i:
+            menu.append("\n")
+        menu.append(f" {entry['key']} ", style=f"bold black on {COLOR_TOOL}")
+        menu.append(f"  {entry['name']}", style="bold")
+        menu.append(f"   {entry['description']}", style=COLOR_DIM)
     console.print()
-    console.print(Text(VERSION_SELECT_TITLE, style="bold"))
-    for entry in VERSIONS:
-        console.print(Text(f"  {entry['key']}. {entry['name']} — {entry['description']}"))
+    console.print(
+        Panel(
+            menu,
+            title=Text(VERSION_SELECT_TITLE, style=COLOR_BANNER),
+            title_align="left",
+            border_style=COLOR_TOOL,
+            box=box.ROUNDED,
+            expand=False,
+            padding=(1, 2),
+        )
+    )
     valid = {entry["key"] for entry in VERSIONS}
     while True:
         try:
@@ -557,7 +585,13 @@ def main() -> None:
     system = _build_system_prompt(include_rules=include_rules)
     messages: list[dict] = []
 
-    print(f"AgentBreaker — {version_name} ({MODEL}). Type 'exit' to quit.\n")
+    console.print()
+    console.rule(Text(f"AgentBreaker · {version_name}", style=COLOR_BANNER), style=COLOR_TOOL)
+    console.print(
+        Text(f"model {MODEL}   ·   type 'exit' to quit", style=COLOR_DIM),
+        justify="center",
+    )
+    console.print()
 
     while True:
         try:
