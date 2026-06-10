@@ -84,8 +84,9 @@ from settings import (
     VERSION_SELECT_PROMPT,
     VERSION_SELECT_TITLE,
     VERSIONS,
+    WORKSPACE_TREE_HEADER,
 )
-from context import format_for_agent
+from context import format_for_agent, workspace_tree
 from intercepter import InterceptContext, evaluate
 
 # Repo root (this file lives in src/, so the root is one level up).
@@ -147,6 +148,7 @@ def _build_system_prompt(include_rules: bool) -> str:
         lines.append(f"- {name} ({role}) <{email}> — {phone}")
     directory = "\n".join(lines)
     prompt = f"{SYSTEM_PROMPT}\n\n{directory}"
+    prompt += f"\n\n{WORKSPACE_TREE_HEADER}\n{workspace_tree()}"
     if include_rules:
         prompt += f"\n\n{AGENT_RULES}"
     return prompt

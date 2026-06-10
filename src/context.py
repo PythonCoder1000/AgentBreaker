@@ -27,6 +27,8 @@ from settings import (
     INTERCEPT_MAX_FILES_READ,
     INTERCEPT_MAX_GLOB_MATCHES,
     TESTING_ENV_DIRNAME,
+    WORKSPACE_TREE_MAX_DEPTH,
+    WORKSPACE_TREE_MAX_ENTRIES,
 )
 
 # Repo root (this file lives in src/). Email-attachment paths are still expressed
@@ -69,6 +71,45 @@ def gather_file_context(tool_name: str, tool_input: dict) -> list[tuple[str, str
     return out
 
 
+def workspace_tree() -> str:
+    """A readable, indented listing of the agents' workspace (AGENT_ROOT).
+
+    Given to the agents — so they know exactly what files exist and where, instead
+    of guessing paths after the cwd was rooted here — and to the policy evaluator,
+    so it can ground a referenced path in the real structure. Directories first,
+    then files; depth- and entry-capped to stay light. Paths shown are relative to
+    the workspace root (no leading workspace-name prefix), matching the shell cwd.
+    """
+    if not AGENT_ROOT.is_dir():
+        return "(workspace is empty)"
+    lines: list[str] = []
+    truncated = False
+
+    def walk(directory: Path, depth: int) -> None:
+        nonlocal truncated
+        if depth > WORKSPACE_TREE_MAX_DEPTH or truncated:
+            return
+        try:
+            entries = sorted(directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except OSError:
+            return
+        for entry in entries:
+            if len(lines) >= WORKSPACE_TREE_MAX_ENTRIES:
+                truncated = True
+                return
+            indent = "  " * depth
+            if entry.is_dir() and not entry.is_symlink():
+                lines.append(f"{indent}{entry.name}/")
+                walk(entry, depth + 1)
+            else:
+                lines.append(f"{indent}{entry.name}")
+
+    walk(AGENT_ROOT, 0)
+    if truncated:
+        lines.append("… (truncated)")
+    return "\n".join(lines) or "(workspace is empty)"
+
+
 def format_for_agent(file_context: list[tuple[str, str]]) -> str:
     """Render gathered files as a block to append to the agent's tool result."""
     if not file_context:
@@ -91,9 +132,11 @@ def command_paths(command: str) -> list[str]:
     """Path-like tokens in a shell command, with globs expanded to real files.
 
     A token is kept if it looks like a path (contains '/', a file extension, or a
-    glob metacharacter). Glob patterns are expanded against the project tree so a
-    pattern like 'testing_env/secret*/credentials.json' or '.e*' surfaces the real
-    file it would read — otherwise it fragments into tokens that match nothing,
+    glob metacharacter) OR it names a file that actually exists in the workspace —
+    so even an extensionless target like `cat README` or `cat credentials` is
+    surfaced and the evaluator always sees the file it would touch. Glob patterns
+    are expanded against the workspace so 'secret*/credentials.json' or '.e*'
+    surfaces the real file — otherwise it fragments into tokens that match nothing,
     blinding both the sensitive-path block and the AI evaluator.
     """
     paths: list[str] = []
@@ -102,13 +145,27 @@ def command_paths(command: str) -> list[str]:
             continue
         token = os.path.expanduser(token)  # ~ -> $HOME, so the real target is seen
         has_glob = bool(_GLOB_META.search(token))
-        if not ("/" in token or has_glob or re.search(r"\.[A-Za-z0-9]+$", token)):
+        looks_like_path = "/" in token or has_glob or bool(re.search(r"\.[A-Za-z0-9]+$", token))
+        if not looks_like_path and not _exists_in_workspace(token):
             continue
         if has_glob:
             paths.extend(_expand_glob(token))
         else:
             paths.append(token)
     return paths
+
+
+def _exists_in_workspace(token: str) -> bool:
+    """Whether a bare token names a real file/dir under the workspace root.
+
+    Lets an extensionless target (`README`, `credentials`) still be surfaced for
+    grounding. Only true for paths that exist, so it never invents files — it can
+    only add real grounding, never a false block.
+    """
+    try:
+        return (AGENT_ROOT / token).exists()
+    except OSError:
+        return False
 
 
 def _expand_glob(pattern: str) -> list[str]:

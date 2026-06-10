@@ -33,7 +33,7 @@ if str(_SRC) not in sys.path:
 import anthropic  # noqa: E402
 
 from config import EMAIL_BODY_PREVIEW_CHARS, EVENT_OUTPUT_MAX_CHARS  # noqa: E402
-from context import format_for_agent  # noqa: E402
+from context import format_for_agent, workspace_tree  # noqa: E402
 from intercepter import decide  # noqa: E402
 from settings import (  # noqa: E402
     AGENT_NO_CONTENT_NOTICE,
@@ -59,6 +59,7 @@ from settings import (  # noqa: E402
     SYSTEM_PROMPT,
     TESTING_ENV_DIRNAME,
     TOOLS,
+    WORKSPACE_TREE_HEADER,
 )
 
 # run_bash executes from inside the testing_env workspace (the agents' root),
@@ -86,6 +87,7 @@ def build_system_prompt(include_rules: bool) -> str:
         phone = contact.get("phone", "no phone on file")
         lines.append(f"- {name} ({role}) <{email}> — {phone}")
     prompt = f"{SYSTEM_PROMPT}\n\n" + "\n".join(lines)
+    prompt += f"\n\n{WORKSPACE_TREE_HEADER}\n{workspace_tree()}"
     if include_rules:
         prompt += f"\n\n{AGENT_RULES}"
     return prompt
