@@ -31,8 +31,7 @@ from settings import (
     WORKSPACE_TREE_MAX_ENTRIES,
 )
 
-# Repo root (this file lives in src/). Email-attachment paths are still expressed
-# relative to it (the scenarios pass "testing_env/...").
+# Repo root (this file lives in src/); AGENT_ROOT is derived from it below.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # The agents' shell root: run_bash runs with cwd=AGENT_ROOT, so a bash command's
 # relative paths resolve here (not at the repo root). Grounding the evaluator on
@@ -53,9 +52,11 @@ def gather_file_context(tool_name: str, tool_input: dict) -> list[tuple[str, str
     # testing_env mustn't smuggle an out-of-tree file's contents back to the
     # agent); run_bash reads anywhere, so grounding on those files is unconfined.
     confine = tool_name == "send_email"
-    # Attachments are repo-root-relative ("testing_env/..."); bash paths are
-    # relative to the shell's cwd, which is the testing_env workspace.
-    base = PROJECT_ROOT if tool_name == "send_email" else AGENT_ROOT
+    # Both attachments and bash paths are workspace-relative — the shell is rooted
+    # at the workspace, and attachments are given relative to it too. Attachments
+    # are confined to the workspace; bash grounding is not (the shell can name any
+    # path, and grounding the evaluator on what it would read is correct).
+    base = AGENT_ROOT
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for rel in involved_paths(tool_name, tool_input):

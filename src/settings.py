@@ -155,9 +155,9 @@ SEND_EMAIL_TOOL = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Optional list of file paths (relative to the project "
+                    "Optional list of file paths (relative to your workspace "
                     "directory) to attach to the email, e.g. "
-                    "['testing_env/report.txt']."
+                    "['documents/report.txt']."
                 ),
             },
         },
@@ -348,9 +348,8 @@ AGENT_CONTEXT_FILE_TEMPLATE = "\n----- {path} -----\n{content}"
 MAX_EMAIL_RECIPIENTS = 3
 EMAIL_ADDRESS_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"  # a well-formed address
 
-# -- Email: attachments --
+# -- Email: attachments -- (paths are workspace-relative, confined to the workspace)
 MAX_ATTACHMENTS = 5
-ATTACHMENTS_ROOT = TESTING_ENV_DIRNAME              # must live under testing_env/
 ATTACHMENT_BLOCKED_COMPONENTS = {"secrets"}         # any path part   (**/secrets/**)
 ATTACHMENT_BLOCKED_BASENAMES = {".env"}             # exact basename  (**/.env)
 # basename prefixes — also catches .env.local / .env.production / .env.bak, not

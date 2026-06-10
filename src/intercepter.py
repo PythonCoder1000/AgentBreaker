@@ -51,7 +51,6 @@ from settings import (
     ATTACHMENT_BLOCKED_COMPONENTS,
     ATTACHMENT_BLOCKED_PREFIXES,
     ATTACHMENT_BLOCKED_SUFFIXES,
-    ATTACHMENTS_ROOT,
     BASH_AUTO_ALLOW_COMMANDS,
     BASH_AUTO_ALLOW_DEREF_FLAGS,
     BASH_AUTO_ALLOW_FORBIDDEN_CHARS,
@@ -326,12 +325,16 @@ def _email_hard_block(tool_input: dict) -> str | None:
 
 
 def _attachment_blocked(path: str) -> str | None:
+    # Attachment paths are workspace-relative (the shell is rooted at the
+    # workspace), so a path is "inside" as long as it's not absolute and doesn't
+    # climb out with `..`. normpath collapses any internal `..`, so a remaining
+    # leading `..` is a genuine escape above the workspace root.
     norm = posixpath.normpath(str(path).replace("\\", "/"))
     parts = norm.split("/")
     base = parts[-1]
     base_l = base.lower()  # match case-insensitively (case-insensitive FS)
-    if norm.startswith("/") or ".." in parts or parts[0].lower() != ATTACHMENTS_ROOT.lower():
-        return f"attachment outside {ATTACHMENTS_ROOT}/: {path}"
+    if norm.startswith("/") or ".." in parts:
+        return f"attachment outside the workspace: {path}"
     if any(part.lower() in ATTACHMENT_BLOCKED_COMPONENTS for part in parts):
         return f"attachment in a secrets path: {path}"
     if base_l in ATTACHMENT_BLOCKED_BASENAMES:

@@ -169,17 +169,22 @@ def _result_count(block: object) -> int | None:
     return len(content) if isinstance(content, list) else None
 
 
-def _resolve_in_project(path: str) -> Path | None:
-    """Resolve a user-supplied path inside the project directory.
+def _resolve_in_workspace(path: str) -> Path | None:
+    """Resolve a user-supplied (workspace-relative) attachment path inside the
+    testing_env workspace.
 
-    Returns the absolute resolved path if it stays within PROJECT_ROOT, or None
-    if the path is empty, names the root itself, or would escape it. Used to
-    confine email attachments to the project tree; run_bash itself is unrestricted.
+    Returns the absolute resolved path if it stays within TESTING_ENV, or None if
+    the path is empty, names the root itself, or would escape it (symlinks are
+    resolved, so a link out of the workspace is rejected). Attachments are given
+    relative to the workspace, matching the shell's cwd.
     """
     if not path or not path.strip():
         return None
-    candidate = (PROJECT_ROOT / path).resolve()
-    if candidate != PROJECT_ROOT and candidate.is_relative_to(PROJECT_ROOT):
+    try:
+        candidate = (TESTING_ENV / path).resolve()
+    except (OSError, ValueError):  # e.g. ENAMETOOLONG / embedded null byte
+        return None
+    if candidate != TESTING_ENV and candidate.is_relative_to(TESTING_ENV):
         return candidate
     return None
 
@@ -324,15 +329,15 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     email = _sanitize(str(tool_input.get("email", "")))
     message = _sanitize_block(str(tool_input.get("message", "")))
 
-    # Resolve each requested attachment inside the project directory; a path that
-    # escapes or doesn't exist is reported back as skipped, not silently dropped.
+    # Resolve each requested attachment inside the workspace; a path that escapes
+    # or doesn't exist is reported back as skipped, not silently dropped.
     raw = tool_input.get("attachments")
     requested = raw if isinstance(raw, list) else []
     attached: list[tuple[str, int]] = []
     missing: list[str] = []
     for item in requested:
         rel = _sanitize(str(item))
-        target = _resolve_in_project(rel)
+        target = _resolve_in_workspace(rel)
         if _is_workspace_file(target):
             attached.append((rel, _file_size(target)))
         else:
