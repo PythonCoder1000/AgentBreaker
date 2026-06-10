@@ -1,0 +1,33 @@
+# Render.com blueprint for the AgentBreaker web demo.
+#
+# Deploy: push this repo to GitHub, then on render.com create a new Blueprint
+# pointed at the repo. Render reads this file and provisions the service. Fill in
+# the three secret env vars (marked sync:false) in the dashboard — they are NOT
+# committed. See README.md ("Deploying") for the full walkthrough.
+#
+# The app is a single long-lived process (in-memory sessions + SSE streams), so
+# it must run as a web service, not a serverless function. Free tier spins the
+# instance down after ~15 min idle; the first request after that is a cold start
+# and in-memory chat history is reset.
+
+services:
+  - type: web
+    name: agentbreaker
+    runtime: python
+    plan: free
+    # uv respects pyproject's package=false and the committed uv.lock for a
+    # reproducible install of the `web` extra (fastapi + uvicorn + sse-starlette).
+    buildCommand: pip install uv && uv sync --extra web
+    # Bind 0.0.0.0 and the platform-injected $PORT. --app-dir puts web/backend on
+    # the import path so `app:app` and its sibling imports resolve.
+    startCommand: uv run uvicorn app:app --host 0.0.0.0 --port $PORT --app-dir web/backend
+    healthCheckPath: /healthz
+    envVars:
+      # Your Anthropic key — every run spends credits. Set in the dashboard.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Basic Auth gate. Set BOTH to require a password; leave unset to run open.
+      - key: BASIC_AUTH_USER
+        sync: false
+      - key: BASIC_AUTH_PASS
+        sync: false

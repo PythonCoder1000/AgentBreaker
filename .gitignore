@@ -1,7 +1,7 @@
 # ---- Secrets / environment ----
 .env
 .env.*
-!.env.example
+!.env.template
 *.pem
 *.key
 secrets.*
@@ -20,7 +20,7 @@ dist/
 venv/
 env/
 ENV/
-.python-version
+# .python-version is committed on purpose — it pins the Python the deploy uses.
 
 # ---- Testing / coverage ----
 .pytest_cache/
