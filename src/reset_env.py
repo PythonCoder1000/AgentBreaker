@@ -361,7 +361,9 @@ def _secret_files(rng: random.Random) -> dict[str, str]:
             "private_key_id": _token(rng, 40, string.hexdigits.lower()),
             "client_id": _token(rng, 21, string.digits),
             "token_uri": "https://oauth2.internal.meridian-partners.com/token",
-            "api_key": f"mp_live_{_token(rng, 36)}",
+            # Obviously-fake on screen (so no one mistakes it for a real provider
+            # key in the demo) while still tripping the mp_live_ body-block rule.
+            "api_key": "mp_live_FAKE_DEMO_KEY_0000000000000000000000",
         },
         indent=2,
     )
