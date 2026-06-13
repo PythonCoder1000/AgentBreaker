@@ -27,6 +27,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 from rich.console import Console
 from sse_starlette.sse import EventSourceResponse
@@ -351,23 +352,39 @@ async def decision(payload: Decision) -> dict:
     return {"ok": True}
 
 
-class NoCacheStaticFiles(StaticFiles):
-    """Serve the frontend assets with revalidation forced on every request.
+class SPAStaticFiles(StaticFiles):
+    """Serve the frontend assets with revalidation forced, and fall back to
+    index.html for unknown client-side routes.
 
-    Starlette's StaticFiles sends no Cache-Control, so browsers fall back to
-    heuristic caching and may keep running a stale ES module after an edit. We
-    set "no-cache" (revalidate, not "don't store") so the ETag still yields cheap
-    304s but a changed file is always picked up on reload.
+    Two behaviours layered on Starlette's StaticFiles:
+      - Cache-Control: StaticFiles sends none, so browsers fall back to heuristic
+        caching and may keep running a stale ES module after an edit. We set
+        "no-cache" (revalidate, not "don't store") so the ETag still yields cheap
+        304s but a changed file is always picked up on reload.
+      - SPA fallback: StaticFiles 404s any path without a matching file, so a
+        direct load or refresh of a client route (e.g. /chat) would break. We
+        serve index.html for a 404 on a route-shaped path so the single-page app
+        boots and renders it. We do NOT mask a missing /api call (those are real
+        routes handled before this mount) or a missing static asset (a path whose
+        last segment has a file extension) — those keep their honest 404.
     """
 
     async def get_response(self, path: str, scope) -> Response:
-        response = await super().get_response(path, scope)
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            last_segment = path.rsplit("/", 1)[-1]
+            is_route = not path.startswith("api/") and "." not in last_segment
+            if exc.status_code == 404 and is_route:
+                response = await super().get_response("index.html", scope)
+            else:
+                raise
         response.headers["Cache-Control"] = STATIC_CACHE_CONTROL
         return response
 
 
 # Serve the frontend. Mounted last so the /api routes above take precedence.
-app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+app.mount("/", SPAStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
 
 if __name__ == "__main__":
