@@ -44,6 +44,9 @@ yarn-error.log*
 *.swp
 *.swo
 
+# ---- Agent tooling (Claude Code local config + agent memory) ----
+.claude/
+
 # ---- OS ----
 .DS_Store
 Thumbs.db
