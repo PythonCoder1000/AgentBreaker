@@ -32,7 +32,13 @@ if str(_SRC) not in sys.path:
 
 import anthropic  # noqa: E402
 
-from config import EMAIL_BODY_PREVIEW_CHARS, EVENT_OUTPUT_MAX_CHARS  # noqa: E402
+from config import (  # noqa: E402
+    ATTACHMENT_SCAN_MAX_BYTES,
+    EMAIL_BODY_PREVIEW_CHARS,
+    EVENT_OUTPUT_MAX_CHARS,
+    SECRET_CONTENT_PATTERNS,
+    SECRET_PATH_PATTERNS,
+)
 from context import format_for_agent, workspace_tree  # noqa: E402
 from intercepter import decide  # noqa: E402
 from settings import (  # noqa: E402
@@ -68,6 +74,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TESTING_ENV = (PROJECT_ROOT / TESTING_ENV_DIRNAME).resolve()
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+# Compiled once: deterministic "this moved/exposed secrets" signals used to flag a
+# Prompt-Agent tool call that ran without an enforced policy (see _looks_dangerous).
+_SECRET_CONTENT_RE = [re.compile(p) for p in SECRET_CONTENT_PATTERNS]
+_SECRET_PATH_RE = [re.compile(p) for p in SECRET_PATH_PATTERNS]
 
 
 def _safe(text: object) -> str:
@@ -161,6 +172,52 @@ def _display_params(tool_name: str, tool_input: dict) -> dict:
     if tool_name == "web_search":
         return {"query": _safe(tool_input.get("query", ""))}
     return {key: _safe(value) for key, value in tool_input.items()}
+
+
+# --------------------------------------------------------------------------- #
+# Badge danger heuristic (Prompt Agent only)
+# --------------------------------------------------------------------------- #
+def _has_secret_content(text: str) -> bool:
+    return any(rx.search(text) for rx in _SECRET_CONTENT_RE)
+
+
+def _read_attachment(name: str) -> str:
+    """Read an attachment's text, confined to the testing_env workspace (so a path
+    can't escape it). Returns "" if it isn't a readable file inside the workspace."""
+    try:
+        target = (TESTING_ENV / name).resolve()
+    except OSError:
+        return ""
+    if target != TESTING_ENV and not target.is_relative_to(TESTING_ENV):
+        return ""
+    if not target.is_file():
+        return ""
+    try:
+        with target.open("rb") as fh:
+            return fh.read(ATTACHMENT_SCAN_MAX_BYTES).decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _looks_dangerous(tool_name: str, tool_input: dict) -> bool:
+    """Did this (unenforced) Prompt-Agent call actually move or expose secrets?
+
+    Deterministic and content-aware: reads what the call touches — the attachment
+    files and body of a send_email, or the path a run_bash command targets — so an
+    exfiltration is flagged even when the recipient is an internal address and the
+    file has an innocent name (e.g. documents/report.json). Used only to colour the
+    ALLOWED badge; it never blocks anything. No model call, so it adds no latency.
+    """
+    if tool_name == "send_email":
+        if _has_secret_content(str(tool_input.get("message", ""))):
+            return True
+        raw = tool_input.get("attachments")
+        names = raw if isinstance(raw, list) else []
+        return any(_has_secret_content(_read_attachment(str(name))) for name in names)
+    if tool_name == "run_bash":
+        command = str(tool_input.get("command", ""))
+        return any(rx.search(command) for rx in _SECRET_PATH_RE)
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -266,7 +323,10 @@ def _handle_tool(run, block) -> dict:
             }
         run.emit("tool_allowed", tool=name, call_id=call_id, reason=reason)
     else:
-        run.emit("tool_allowed", tool=name, call_id=call_id, reason="")
+        # Prompt Agent: nothing enforced the call. Flag it red if it actually moved
+        # or exposed secrets, so an exfiltration never shows a plain green ALLOWED.
+        run.emit("tool_allowed", tool=name, call_id=call_id, reason="",
+                 danger=_looks_dangerous(name, tool_input))
 
     if name == "run_bash":
         result = _run_bash(str(tool_input.get("command", "")))
