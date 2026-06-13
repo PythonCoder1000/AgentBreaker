@@ -14,18 +14,19 @@ function Params({ params }) {
 }
 
 // A single feed event.
-function FeedItem({ ev, resolved, onDecide }) {
+function FeedItem({ ev, resolved, onDecide, onGrow }) {
   const [clicked, setClicked] = useState(null);
 
   switch (ev.type) {
     case "user_message":
       return html`<div class="item bubble user">
         <span class="who">Injected prompt</span>
-        <${Typewriter} text=${ev.text} />
+        <${Typewriter} text=${ev.text} onGrow=${onGrow} />
       </div>`;
 
     case "tool_call":
       return html`<div class="item tool-call">
+        <div class="tc-caption">The agent tried to:</div>
         <div class="tc-head"><span class="glyph">⏺</span><span class="tname">${ev.tool}</span>
           ${ev.server ? html`<span style=${{ color: "var(--dim)", fontSize: "11px" }}>server-side</span>` : null}
         </div>
@@ -33,6 +34,19 @@ function FeedItem({ ev, resolved, onDecide }) {
       </div>`;
 
     case "tool_allowed":
+      // The Prompt Agent has no enforced policy, so a call that actually moved or
+      // exposed secrets still "runs" — flag it red (not green) so an exfiltration
+      // doesn't read as a success. The word ALLOWED stays (the tool did allow it).
+      if (ev.danger) {
+        const tag = ev.tool === "send_email" ? "🚨 LEAKED" : "⚠ SECRETS EXPOSED";
+        return html`<div class="item verdict allowed danger">
+          <span class="vg">🚨</span>
+          <div class="vbody">
+            <span class="vtitle">ALLOWED · ${ev.tool} <span class="danger-tag">${tag}</span></span>
+            <span class="vreason">No policy stopped this — the action ran and moved sensitive data.</span>
+          </div>
+        </div>`;
+      }
       return html`<div class="item verdict allowed">
         <span class="vg">✓</span>
         <div class="vbody"><span class="vtitle">ALLOWED · ${ev.tool}</span>
@@ -72,7 +86,7 @@ function FeedItem({ ev, resolved, onDecide }) {
     case "agent_response":
       return html`<div class="item bubble agent">
         <span class="who">Agent</span>
-        <${Typewriter} text=${ev.text} />
+        <${Typewriter} text=${ev.text} onGrow=${onGrow} />
       </div>`;
 
     case "error":
@@ -91,7 +105,7 @@ function FeedItem({ ev, resolved, onDecide }) {
 }
 
 // One agent column: its event feed plus a composer that messages this agent only.
-export function Column({ kind, title, events, running, onSend, onDecide }) {
+export function Column({ kind, title, events, running, resetKey, onSend, onDecide }) {
   const feedRef = useRef(null);
   const prevLen = useRef(0);
   const [input, setInput] = useState("");
@@ -105,11 +119,28 @@ export function Column({ kind, title, events, running, onSend, onDecide }) {
     else el.scrollTop = el.scrollHeight;
     prevLen.current = events.length;
   }, [events]);
+  // Every new run/session bumps resetKey: force BOTH panels' scroll back to the
+  // top so the two columns start from the same place (they can otherwise sit at
+  // different scroll points from the previous run).
+  useEffect(() => {
+    if (feedRef.current) feedRef.current.scrollTop = 0;
+  }, [resetKey]);
   // Keep the "thinking…" row in view as soon as a run starts.
   useEffect(() => {
     const el = feedRef.current;
     if (el && running) el.scrollTop = el.scrollHeight;
   }, [running]);
+
+  // Follow text as a message types out — but only when already near the bottom,
+  // so a viewer who scrolled up to read isn't yanked back down. Without this a
+  // long final response types out below the fold and looks cut off mid-sentence.
+  const onGrow = () => {
+    const el = feedRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 140) {
+      requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    }
+  };
 
   // map escalation call_id -> outcome, from later allowed/blocked events
   const resolved = {};
@@ -137,6 +168,7 @@ export function Column({ kind, title, events, running, onSend, onDecide }) {
             key=${i}
             ev=${ev}
             resolved=${ev.call_id ? resolved[ev.call_id] : null}
+            onGrow=${onGrow}
             onDecide=${(callId, approve) => onDecide(kind, callId, approve)} />`)}
           ${running ? html`<div class="item thinking"><span class="spinner"></span> thinking…</div>` : null}`}
     </div>

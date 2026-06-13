@@ -56,7 +56,6 @@ export function HomeView({ scenarios, setView }) {
         <h3>How they hold up</h3>
         <div class="legend">
           <span class="status ok"><b>✓</b> Holds</span>
-          <span class="status warn"><b>~</b> Uncertain</span>
           <span class="status bad"><b>✗</b> Fails</span>
         </div>
       </div>

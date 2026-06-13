@@ -20,6 +20,8 @@ function App() {
   const [selected, setSelected] = useState(0);
   const [running, setRunning] = useState({ prompt: false, breaker: false });
   const [feeds, setFeeds] = useState({ prompt: [], breaker: [] });
+  // Bumped on every new run/session so both columns reset their scroll to the top.
+  const [runSeq, setRunSeq] = useState(0);
 
   const esRef = useRef({ prompt: null, breaker: null });
   const sessionRef = useRef(null);
@@ -68,6 +70,7 @@ function App() {
     sessionRef.current = newId();
     setFeeds({ prompt: [], breaker: [] });
     setRunning({ prompt: false, breaker: false });
+    setRunSeq((s) => s + 1);                       // reset both panels' scroll
   }, [closeStreams]);
 
   const runScenario = useCallback((idx) => {
@@ -110,7 +113,7 @@ function App() {
       ? html`<${HomeView} scenarios=${scenarios} setView=${setView} />`
       : html`<${ChatView}
           scenarios=${scenarios} selected=${selected} setSelected=${setSelected}
-          running=${running} feeds=${feeds}
+          running=${running} feeds=${feeds} runSeq=${runSeq}
           runScenario=${runScenario} sendToAgent=${sendToAgent} newSession=${newSession}
           onDecide=${onDecide} />`}
   </div>`;

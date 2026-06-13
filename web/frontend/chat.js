@@ -5,7 +5,7 @@ import { html, useState } from "./ui.js";
 import { Column } from "./feed.js";
 import { FileExplorer } from "./explorer.js";
 
-export function ChatView({ scenarios, selected, setSelected, running, feeds,
+export function ChatView({ scenarios, selected, setSelected, running, feeds, runSeq,
                            runScenario, sendToAgent, newSession, onDecide }) {
   const [showFiles, setShowFiles] = useState(true);
   const current = scenarios[selected];
@@ -31,9 +31,9 @@ export function ChatView({ scenarios, selected, setSelected, running, feeds,
     <div class="workspace">
       ${showFiles ? html`<${FileExplorer} running=${anyRunning} />` : null}
       <div class="columns">
-        <${Column} kind="prompt" title="Prompt Agent" events=${feeds.prompt}
+        <${Column} kind="prompt" title="Prompt Agent" events=${feeds.prompt} resetKey=${runSeq}
           running=${running.prompt} onSend=${(text) => sendToAgent("prompt", text)} onDecide=${onDecide} />
-        <${Column} kind="breaker" title="Breaker Agent" events=${feeds.breaker}
+        <${Column} kind="breaker" title="Breaker Agent" events=${feeds.breaker} resetKey=${runSeq}
           running=${running.breaker} onSend=${(text) => sendToAgent("breaker", text)} onDecide=${onDecide} />
       </div>
     </div>

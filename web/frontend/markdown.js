@@ -76,8 +76,10 @@ function renderMarkdown(text) {
   return blocks;
 }
 
-// Reveals text, rendering markdown as it goes.
-export function Typewriter({ text, speed = 10 }) {
+// Reveals text, rendering markdown as it goes. `onGrow` (optional) fires after
+// each reveal step so a container can follow the growing text (otherwise a long
+// final message types out below the fold and reads as truncated).
+export function Typewriter({ text, speed = 10, onGrow }) {
   const [n, setN] = useState(0);
   useEffect(() => {
     setN(0);
@@ -86,6 +88,7 @@ export function Typewriter({ text, speed = 10 }) {
     const id = setInterval(() => {
       i += Math.max(1, Math.round(text.length / 400)); // finish long text in ~4s
       setN(Math.min(i, text.length));
+      if (onGrow) onGrow();
       if (i >= text.length) clearInterval(id);
     }, speed);
     return () => clearInterval(id);
