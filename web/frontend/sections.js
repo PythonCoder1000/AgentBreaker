@@ -11,7 +11,7 @@ const Mark = () => html`<span class="vb-logo-mark">▮</span>`;
 export function Nav() {
   return html`<nav class="vb-nav">
     <div class="vb-nav-inner">
-      <div class="vb-logo"><${Mark} /> Vault&nbsp;Boundary</div>
+      <div class="vb-logo"><${Mark} /> Vault Boundary</div>
       <div class="vb-nav-links">
         <a class="vb-nav-link" href="#demo">Live demo</a>
         <a class="vb-nav-link" href="#how">How it works</a>
