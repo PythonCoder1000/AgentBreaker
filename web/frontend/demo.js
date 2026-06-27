@@ -179,22 +179,41 @@ function DemoColumn({ kind, name, caption, events, running, scan, resetKey, onDe
 // Section.
 // ---------------------------------------------------------------------------
 export function LiveDemo({ scenarios, selected, setSelected, running, feeds, scans, identity,
-                           runSeq, onRun, onDecide, onRevoke, onVerifyAudit }) {
+                           runSeq, onRun, onNewChat, onDecide, onRevoke, onVerifyAudit }) {
   const [freeText, setFreeText] = useState("");
   const [lastRun, setLastRun] = useState(null); // {custom:bool, id?}
   const anyRunning = running.prompt || running.breaker;
   const sel = scenarios[selected];
+  const conversationActive = feeds.prompt.length > 0 || feeds.breaker.length > 0;
 
   const pick = (i) => { setSelected(i); setFreeText(""); };
+
   const onRunClick = () => {
     if (anyRunning || !scenarios.length) return;
     const custom = freeText.trim();
-    setLastRun(custom ? { custom: true } : { custom: false, id: sel.id });
-    onRun(selected, custom);
+    if (custom) {
+      // A typed prompt is a follow-up: it continues the current chat. Clear the box
+      // so the next follow-up starts fresh.
+      setLastRun({ custom: true });
+      onRun(selected, custom);
+      setFreeText("");
+    } else {
+      // An empty box runs the selected preset attack in a fresh chat.
+      setLastRun({ custom: false, id: sel.id });
+      onRun(selected, "");
+    }
+  };
+
+  const onNewChatClick = () => {
+    if (anyRunning) return;
+    onNewChat();
+    setFreeText("");
+    setLastRun(null);
   };
 
   const summary = lastRun && !lastRun.custom && SUMMARIES[lastRun.id];
-  const showWhat = !!summary && !anyRunning && (feeds.prompt.length > 0 || feeds.breaker.length > 0);
+  const showWhat = !!summary && !anyRunning && conversationActive;
+  const runLabel = anyRunning ? "Running…" : (freeText.trim() ? "▶ Send to both" : "▶ Run both");
 
   return html`<section id="demo" class="vb-section">
     <div class="vb-section-head">
@@ -214,15 +233,19 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
             <span class="vb-chip-label">${m.label}</span>
           </button>`;
         })}
+        <button class="vb-newchat" disabled=${anyRunning} onClick=${onNewChatClick}
+          title="Clear the conversation and start a fresh session">+ New chat</button>
       </div>
       <div class="vb-task-row">
         <div class="vb-task-field">
-          <div class="vb-task-label">The task both agents receive</div>
-          <textarea class="vb-task-input" value=${freeText} placeholder=${sel ? sel.task : "Select an attack…"}
-            onInput=${(e) => setFreeText(e.target.value)}></textarea>
+          <div class="vb-task-label">${conversationActive ? "Ask a follow-up — both agents answer in this chat" : "The task both agents receive"}</div>
+          <textarea class="vb-task-input" value=${freeText}
+            placeholder=${conversationActive ? "Ask a follow-up question (sent to both agents)…" : (sel ? sel.task : "Select an attack…")}
+            onInput=${(e) => setFreeText(e.target.value)}
+            onKeyDown=${(e) => { if (e.key === "Enter" && !e.shiftKey && freeText.trim()) { e.preventDefault(); onRunClick(); } }}></textarea>
         </div>
         <button class=${"vb-run-btn" + (anyRunning ? " running" : "")} disabled=${anyRunning || !scenarios.length} onClick=${onRunClick}>
-          ${anyRunning ? "Running…" : "▶ Run both"}
+          ${runLabel}
         </button>
       </div>
     </div>

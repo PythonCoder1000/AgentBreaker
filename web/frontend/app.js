@@ -97,15 +97,20 @@ function App() {
     setRunSeq((s) => s + 1);
   }, [closeStreams]);
 
-  // "Run both": the same task streams into BOTH columns at once. A non-empty
-  // custom override is sent as a free-text message; otherwise the preset scenario.
+  // "Run both": the same task streams into BOTH columns at once.
+  //  - A typed prompt is a follow-up: it CONTINUES the current chat (the backend
+  //    keeps per-session history and each message resumes from it), so a multi-turn
+  //    conversation accumulates until the user starts a new chat.
+  //  - A preset attack starts a FRESH chat (new session).
   const runDemo = useCallback((idx, customText) => {
     if (!scenarios.length) return;
-    newSession();
     const text = (customText || "").trim();
-    AGENTS.forEach((agent) => openStream(agent, (p) => {
-      if (text) p.set("message", text); else p.set("scenario", scenarios[idx].id);
-    }));
+    if (text) {
+      AGENTS.forEach((agent) => openStream(agent, (p) => p.set("message", text)));
+    } else {
+      newSession();
+      AGENTS.forEach((agent) => openStream(agent, (p) => p.set("scenario", scenarios[idx].id)));
+    }
   }, [scenarios, newSession, openStream]);
 
   const onDecide = useCallback((agent, callId, approve) => {
@@ -137,7 +142,7 @@ function App() {
     <${LiveDemo}
       scenarios=${scenarios} selected=${selected} setSelected=${setSelected}
       running=${running} feeds=${feeds} scans=${scans} identity=${identity} runSeq=${runSeq}
-      onRun=${runDemo} onDecide=${onDecide} onRevoke=${onRevoke} onVerifyAudit=${onVerifyAudit} />
+      onRun=${runDemo} onNewChat=${newSession} onDecide=${onDecide} onRevoke=${onRevoke} onVerifyAudit=${onVerifyAudit} />
     <${HowItWorks} />
     <${WhyDifferent} />
     <${Footer} />
