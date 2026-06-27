@@ -217,8 +217,8 @@ export function WhyDifferent() {
     <div class="vb-compare">
       <div class="vb-compare-head">
         <div class="vb-compare-q">The question</div>
-        <div class="vb-compare-agent prompt"><span class="vb-swatch"></span>Prompt Agent</div>
-        <div class="vb-compare-agent breaker"><span class="vb-swatch"></span>Breaker Agent</div>
+        <div class="vb-compare-agent prompt"><span class="vb-swatch"></span>Prompt-Only Agent</div>
+        <div class="vb-compare-agent breaker"><span class="vb-swatch"></span>Vault Agent</div>
       </div>
       ${COMPARE_ROWS.map((r, i) => html`<div key=${i} class="vb-compare-row">
         <div class="vb-compare-cell-q">${r.q}</div>

@@ -320,15 +320,15 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
       <span class="vb-legend-item"><span class="vb-swatch good"></span>good: safe / clean / attack blocked</span>
       <span class="vb-legend-item"><span class="vb-swatch bad"></span>bad: exposed / leaked</span>
       <span class="vb-legend-item"><span class="vb-swatch warn"></span>needs human approval</span>
-      <span class="vb-legend-item"><span class="vb-swatch round prompt"></span>Prompt Agent</span>
-      <span class="vb-legend-item"><span class="vb-swatch round breaker"></span>Breaker Agent</span>
+      <span class="vb-legend-item"><span class="vb-swatch round prompt"></span>Prompt-Only Agent</span>
+      <span class="vb-legend-item"><span class="vb-swatch round breaker"></span>Vault Agent</span>
     </div>
 
     <!-- columns -->
     <div class="vb-cols">
-      <${DemoColumn} kind="prompt" name="Prompt Agent" caption="baseline · guardrails are only prompt text"
+      <${DemoColumn} kind="prompt" name="Prompt-Only Agent" caption="baseline · guardrails are only prompt text"
         events=${feeds.prompt} running=${running.prompt} scan=${scans.prompt} resetKey=${runSeq} onDecide=${onDecide} />
-      <${DemoColumn} kind="breaker" name="Breaker Agent" caption="the new way · access at runtime"
+      <${DemoColumn} kind="breaker" name="Vault Agent" caption="enforced · every tool call checked at runtime"
         events=${feeds.breaker} running=${running.breaker} scan=${scans.breaker} resetKey=${runSeq} onDecide=${onDecide}
         identityPanel=${html`
           <${IdentityPanel} token=${identity.breaker} onRevoke=${() => onRevoke("breaker")} onVerifyAudit=${onVerifyAudit} />
@@ -343,11 +343,11 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
           <div class="vb-what-grid">
             <div class="vb-what-cell first">
               <span class="vb-what-emoji">🚨</span>
-              <div><div class="vb-what-label prompt">Prompt Agent</div><div class="vb-what-text">${summary.prompt}</div></div>
+              <div><div class="vb-what-label prompt">Prompt-Only Agent</div><div class="vb-what-text">${summary.prompt}</div></div>
             </div>
             <div class="vb-what-cell">
               <span class="vb-what-emoji">🔒</span>
-              <div><div class="vb-what-label breaker">Breaker Agent</div><div class="vb-what-text">${summary.breaker}</div></div>
+              <div><div class="vb-what-label breaker">Vault Agent</div><div class="vb-what-text">${summary.breaker}</div></div>
             </div>
           </div>
           <div class="vb-what-cta">Convinced? <a href="https://github.com/PythonCoder1000/AgentBreaker">⭐ Star it on GitHub</a> · <a href="#how">See the machinery →</a> · <a href="#run">Run it yourself ↓</a></div>
