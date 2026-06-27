@@ -336,7 +336,14 @@ async def stream(agent: str, session: str, scenario: str | None = None, message:
     if agent not in ("prompt", "breaker"):
         raise HTTPException(status_code=400, detail="agent must be 'prompt' or 'breaker'")
     if (session, agent) in REVOKED_SESSIONS:
-        raise HTTPException(status_code=403, detail="session token has been revoked")
+        # EventSource doesn't expose HTTP status codes — stream an error event so
+        # the feed shows the real reason instead of the generic "server down" message.
+        async def _revoked_gen():
+            yield {"data": json.dumps({
+                "type": "error",
+                "message": "Token revoked. Click “New chat” to start a fresh session.",
+            })}
+        return EventSourceResponse(_revoked_gen())
     sc = None
     if message and message.strip():
         task, replies = message, []
