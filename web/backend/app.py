@@ -63,7 +63,7 @@ import scenarios  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import audit as audit_module  # noqa: E402
 import reset_env  # noqa: E402
-from identity import Scope, generate_token, revoke_token  # noqa: E402
+from identity import CapabilityToken, Scope, generate_token, revoke_token  # noqa: E402
 from intercepter import InterceptContext  # noqa: E402
 from settings import (  # noqa: E402
     AGENT_NAME,
@@ -88,6 +88,11 @@ HISTORY: dict[tuple[str, str], list] = {}
 # each new Run so revocation survives turn boundaries (new turns would otherwise
 # re-issue a fresh root token that is not in _REVOKED).
 REVOKED_SESSIONS: set[tuple[str, str]] = set()
+# Latest capability token issued per (session_id, agent). Kept so the operator can
+# revoke a session even after its run finished: RUNS only holds a run while it is
+# actively streaming (the SSE generator pops it on completion), so revoke must not
+# depend on a live run being present.
+SESSION_TOKENS: dict[tuple[str, str], CapabilityToken] = {}
 
 
 class Run:
@@ -347,6 +352,8 @@ async def stream(agent: str, session: str, scenario: str | None = None, message:
     history = HISTORY.get(key, [])      # continue the session's conversation
     run = Run(session, agent, task, history, replies, asyncio.get_running_loop(), api_key)
     RUNS[key] = run
+    if getattr(run, "token", None) is not None:
+        SESSION_TOKENS[key] = run.token  # so the token stays revocable after the run ends
     run.start()
 
     async def generator():
@@ -385,6 +392,7 @@ async def reset_session(req: ResetRequest) -> dict:
             run.cancel()
         HISTORY.pop(key, None)
         REVOKED_SESSIONS.discard(key)
+        SESSION_TOKENS.pop(key, None)
     return {"ok": True}
 
 
@@ -404,21 +412,25 @@ class RevokeRequest(BaseModel):
 
 @app.post("/api/revoke")
 async def revoke_agent(req: RevokeRequest) -> dict:
-    """Revoke the active capability token for an agent session.
+    """Revoke the capability token for an agent session.
 
-    All subsequent tool calls from this session (and any sub-agents it has
-    spawned) are blocked at tier 0 of the interceptor, even if a new turn is
-    started. The SSE stream receives an identity_revoked event.
+    Works whether or not a run is currently streaming: RUNS only holds a run while
+    it is live, so the token is also looked up from SESSION_TOKENS once the run has
+    ended. All subsequent tool calls from this session (and any sub-agents it has
+    spawned) are blocked at tier 0, and — because each new turn issues a fresh root
+    token — the session is marked revoked so future turns are blocked too. If the
+    run is still live, its SSE stream receives an identity_revoked event.
     """
     _validate_session(req.session)
-    run = RUNS.get((req.session, req.agent))
+    key = (req.session, req.agent)
+    run = RUNS.get(key)
     token = getattr(run, "token", None) if run is not None else None
     if token is None:
-        raise HTTPException(status_code=404, detail="no active token for that session/agent")
+        token = SESSION_TOKENS.get(key)  # the run has ended; use the last-issued token
+    if token is None:
+        raise HTTPException(status_code=404, detail="no token has been issued for that session/agent")
     revoke_token(token.token_id)
-    # Block future turns for this session — each turn issues a fresh root token,
-    # so revoking the token id alone wouldn't stop a new turn from re-arming.
-    REVOKED_SESSIONS.add((req.session, req.agent))
+    REVOKED_SESSIONS.add(key)
     if run is not None:
         run.emit("identity_revoked", token_id=token.token_id[:8])
     return {"ok": True, "revoked_token": token.token_id[:8]}
