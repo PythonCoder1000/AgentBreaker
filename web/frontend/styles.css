@@ -138,7 +138,11 @@ em { font-style: normal; color: var(--t-hi3); }
 .vb-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
 .vb-h1 { font-family: var(--display); font-weight: 700; font-size: 60px; line-height: 1.04; letter-spacing: -1.4px; margin: 0 0 22px; color: var(--t-hi); text-wrap: balance; }
 .vb-lead { max-width: 620px; margin: 0 auto 34px; font-size: 18px; line-height: 1.6; color: var(--t-body2); text-wrap: pretty; }
-.vb-hero-ctas { display: flex; gap: 13px; justify-content: center; flex-wrap: wrap; margin-bottom: 54px; }
+.vb-hero-ctas { display: flex; gap: 13px; justify-content: center; flex-wrap: wrap; margin-bottom: 26px; }
+.vb-scoreboard {
+  max-width: 640px; margin: 0 auto 44px; font-family: var(--mono); font-size: 12px;
+  line-height: 1.7; color: var(--t-muted); text-align: center;
+}
 .vb-cta-lg {
   text-decoration: none; background: linear-gradient(180deg, var(--cyan), var(--blue));
   color: var(--cta-ink); font-weight: 700; font-size: 15px; padding: 14px 26px; border-radius: 11px;
@@ -355,6 +359,9 @@ em { font-style: normal; color: var(--t-hi3); }
 .vb-what-label.prompt { color: var(--violet); }
 .vb-what-label.breaker { color: var(--blue); }
 .vb-what-text { font-size: 13.5px; color: var(--t-body); line-height: 1.5; }
+.vb-what-cta { padding: 13px 18px; border-top: 1px solid var(--b4); background: var(--strip-2); font-size: 13px; color: var(--t-muted); text-align: center; }
+.vb-what-cta a { color: var(--blue); text-decoration: none; font-weight: 600; }
+.vb-what-cta a:hover { text-decoration: underline; }
 
 /* sandbox files */
 .vb-sandbox { margin-top: 16px; background: var(--surface-3); border: 1px solid var(--b2); border-radius: 12px; }
