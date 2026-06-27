@@ -1,6 +1,6 @@
 """Context inspector — proves whether a secret ever entered the model's context.
 
-The 1Password thesis is that a credential should never sit in the model's
+The core principle here is that a credential should never sit in the model's
 context. This module makes that property *checkable*: given the full message list
 sent to the model (every user/assistant turn and every tool result), it scans for
 secret material — both the exact live values the broker holds and a set of

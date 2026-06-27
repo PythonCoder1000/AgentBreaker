@@ -294,9 +294,9 @@ BROKER_LEASE_TTL_SECONDS = 120
 
 # secret_ref -> environment variable that (optionally) injects a real secret at
 # runtime. If the env var is unset, the broker mints a synthetic, per-process
-# secret instead, so the demo runs with ZERO external setup. To use real
-# 1Password, populate these env vars from a service account / `op run` / the
-# Environments beta; the broker picks them up with no code change.
+# secret instead, so the demo runs with ZERO external setup. To broker real
+# secrets, populate these env vars from your secrets manager at runtime; the
+# broker picks them up with no code change.
 BROKER_SECRET_ENV = {
     "PAYMENTS_API_KEY": "PAYMENTS_API_KEY",
     "DEPLOY_TOKEN": "DEPLOY_TOKEN",

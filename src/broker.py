@@ -7,11 +7,11 @@ secret value never enters the model's context.
 
 Backends are pluggable (VaultBackend). The default LocalVaultBackend resolves a
 secret from an environment variable when one is set — so a real secret can be
-injected at runtime by 1Password (a service account, `op run`, or the
-Environments beta) — and otherwise mints a synthetic, per-process secret so the
-demo runs with zero external setup. To wire real 1Password, populate the env vars
-in settings.BROKER_SECRET_ENV from your vault (or call set_backend with a custom
-VaultBackend); no other code changes are needed.
+injected at runtime by an external secrets manager — and otherwise mints a
+synthetic, per-process secret so the demo runs with zero external setup. To wire a
+real vault, populate the env vars in settings.BROKER_SECRET_ENV from your secrets
+manager (or call set_backend with a custom VaultBackend); no other code changes
+are needed.
 
 A leased secret is held only inside call(): it authenticates the simulated
 service, contributes a one-way fingerprint to the result (proof a real credential
@@ -60,9 +60,9 @@ class LocalVaultBackend(VaultBackend):
     """Default backend: env-injected secret if present, else a per-process synthetic.
 
     A secret injected via the secret_ref's environment variable (e.g. populated by
-    a 1Password service account / `op run`) takes precedence. Otherwise a synthetic
-    value is minted once per process and reused — high-entropy, realistic-looking,
-    and authenticating to nothing — so the demo never needs real credentials.
+    an external secrets manager) takes precedence. Otherwise a synthetic value is
+    minted once per process and reused — high-entropy, realistic-looking, and
+    authenticating to nothing — so the demo never needs real credentials.
     """
 
     def __init__(self) -> None:
@@ -81,7 +81,7 @@ class LocalVaultBackend(VaultBackend):
         return self._synthetic[secret_ref]
 
 
-# The active backend. Swap it (e.g. for a real 1Password backend) via set_backend.
+# The active backend. Swap it (e.g. for a real vault backend) via set_backend.
 _BACKEND: VaultBackend = LocalVaultBackend()
 
 # Per-process key for the fingerprint HMAC. Keying it (rather than a plain hash of
@@ -91,7 +91,7 @@ _FP_KEY: bytes = os.urandom(32)
 
 
 def set_backend(backend: VaultBackend) -> None:
-    """Replace the active vault backend (the seam for real 1Password wiring)."""
+    """Replace the active vault backend (the seam for wiring a real secrets manager)."""
     global _BACKEND
     _BACKEND = backend
 

@@ -115,8 +115,7 @@ it acts without holding the keys* — the part this build is really about.
   `call_api` schema has no field for a credential — the model cannot supply, read,
   or receive one. Backends are pluggable: the default mints synthetic, per-process
   secrets (zero setup), and a real secret is used the instant its env var is
-  populated — e.g. from a **1Password** service account (`op run`) or the
-  Environments beta — with no code change.
+  populated — injected at runtime from your secrets manager — with no code change.
 - **The context inspector (`src/inspector.py`).** After each turn it scans the
   *entire* context sent to the model (every message and tool result) for credential
   material — both the exact live broker values and a set of secret patterns — and
@@ -284,8 +283,9 @@ not scattered inline:
   interceptor, and the access-layer config — capability-token TTL and default scope,
   the broker's services and secret references, and the inspector's scan patterns.
   The `BROKER_SECRET_ENV` map names the env var that injects a real secret per
-  reference; populate it from **1Password** to broker real credentials (otherwise
-  the broker mints synthetic per-process secrets and the demo needs no setup).
+  reference; populate it from your secrets manager to broker real credentials
+  (otherwise the broker mints synthetic per-process secrets and the demo needs no
+  setup).
 - **`web/backend/config.py`** — the web demo: host/port, the Basic Auth realm and
   health path, the escalation timeout, streaming/output caps, and the badge-danger
   heuristic patterns.
