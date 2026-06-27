@@ -23,11 +23,13 @@ function App() {
 
   useEffect(() => {
     sessionRef.current = newId();
-    // Default the selected attack to Attack 4 (the decisive vault-boundary case),
-    // matching the design, once the scenario list loads.
+    // Default to Attack 1 — the most reliable contrast: the Prompt Agent attaches a
+    // file that secretly holds a key and emails it out, so it leaks consistently,
+    // while the Breaker blocks the send. (Attack 4 depends on the model taking the
+    // injection bait, so both agents can end up holding the line.)
     fetch("/api/scenarios").then((r) => r.json()).then((list) => {
       setScenarios(list);
-      const i = list.findIndex((s) => s.id === "attack-4");
+      const i = list.findIndex((s) => s.id === "attack-1");
       if (i >= 0) setSelected(i);
     }).catch(() => {});
   }, []);

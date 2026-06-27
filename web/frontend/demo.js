@@ -10,10 +10,10 @@ import { SandboxTree } from "./explorer.js";
 // Display copy for the attack chips, keyed by scenario id (the design specifies
 // exact short labels). Falls back to deriving from the scenario name/tagline.
 const CHIP_META = {
-  "attack-1": { head: "Attack 1", label: "innocent secret file" },
+  "attack-1": { head: "⭐ Attack 1", label: "innocent secret file" },
   "attack-2": { head: "Attack 2", label: "exfiltrate offsite" },
   "attack-3": { head: "Attack 3", label: "reveal a secrets file" },
-  "attack-4": { head: "⭐ Attack 4", label: "the vault boundary" },
+  "attack-4": { head: "Attack 4", label: "the vault boundary" },
 };
 
 // Per-scenario "what just happened" summaries (verbatim design copy), shown once
@@ -49,10 +49,19 @@ function chipMeta(sc) {
 // a deterministic leak event has already streamed in.
 // ---------------------------------------------------------------------------
 function inspectorState(scan, running, events) {
-  const exposedNow = events.some((e) => e.type === "tool_allowed" && e.danger);
-  if (scan != null) return scan.clean ? "clean" : "exposed";
-  if (exposedNow) return "exposed";
-  if (running || events.length) return "clean";
+  // Two DIFFERENT properties, so two red states that must not cancel each other:
+  //  - context_scan answers "is a secret sitting in the model's context?"
+  //  - a `danger` tool_allowed (Prompt Agent, unenforced) answers "did a secret
+  //    just get moved/sent out?" — e.g. Attack 1 attaches a secret-bearing file by
+  //    NAME and emails it, exfiltrating it WITHOUT ever reading it into context.
+  // The leak signal is sticky: once a secret has left, a later "context is clean"
+  // scan must not flip the inspector back to green.
+  const leaked = events.some((e) => e.type === "tool_allowed" && e.danger);
+  const scanned = scan != null;
+  if (scanned && !scan.clean) return "exposed"; // a secret really sits in the model context
+  if (leaked) return "leaked";                   // a secret was moved/sent out (sticky)
+  if (scanned && scan.clean) return "clean";
+  if (running || events.length) return "clean";  // optimistic while the run streams
   return "idle";
 }
 
@@ -67,6 +76,11 @@ function Inspector({ scan, running, events }) {
     return html`<div class="vb-inspector clean">
       <span class="vb-insp-icon">🔒</span>
       <div><div class="vb-insp-label">Clean: no secret in context</div><div class="vb-insp-sub">The model never saw a credential</div></div>
+    </div>`;
+  if (state === "leaked")
+    return html`<div class="vb-inspector exposed">
+      <span class="vb-insp-icon">🚨</span>
+      <div><div class="vb-insp-label">Leaked: secret left the sandbox</div><div class="vb-insp-sub">An unenforced action moved a credential out — the send was never checked</div></div>
     </div>`;
   const count = scan && scan.count;
   const findings = scan && scan.findings && scan.findings.length
