@@ -51,6 +51,7 @@ class Scope:
     allowed_paths: Optional[list[str]] = None  # None = global rules; list = allowed path prefixes
     services: Optional[list[str]] = None  # None = all broker services; list = restrict call_api to these
     max_depth: int = 2  # max sub-agent nesting levels this token may spawn (0 = no spawning)
+    spending_limit_usd: Optional[float] = None  # None = no spending cap; float = max cumulative USD this token may charge
 
     def intersect(self, other: "Scope") -> "Scope":
         """Return the most restrictive combination of self and other.
@@ -95,6 +96,15 @@ class Scope:
         # Child loses one depth level from whatever the parent had; can't exceed
         # what the child requested either.
         child_max_depth = max(0, min(self.max_depth - 1, other.max_depth))
+
+        # Spending limit: take the lower (more restrictive) of both limits.
+        if self.spending_limit_usd is not None and other.spending_limit_usd is not None:
+            spending_limit_usd = min(self.spending_limit_usd, other.spending_limit_usd)
+        elif self.spending_limit_usd is not None:
+            spending_limit_usd = self.spending_limit_usd
+        else:
+            spending_limit_usd = other.spending_limit_usd
+
         return Scope(
             tools=tools,
             bash_allowed=bash_allowed,
@@ -102,6 +112,7 @@ class Scope:
             allowed_paths=allowed_paths,
             services=services,
             max_depth=child_max_depth,
+            spending_limit_usd=spending_limit_usd,
         )
 
 
@@ -168,6 +179,7 @@ class CapabilityToken:
                 "allowed_paths": self.scope.allowed_paths,
                 "services": self.scope.services,
                 "max_depth": self.scope.max_depth,
+                "spending_limit_usd": self.scope.spending_limit_usd,
             },
             "revoked": is_token_revoked(self),
         }

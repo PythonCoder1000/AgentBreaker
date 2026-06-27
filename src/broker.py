@@ -35,6 +35,7 @@ from typing import Optional
 import audit
 from identity import CapabilityToken
 from settings import (
+    BROKER_BUDGET_EXCEEDED_TEMPLATE,
     BROKER_LEASE_TTL_SECONDS,
     BROKER_NO_CREDENTIAL_TEMPLATE,
     BROKER_OUT_OF_SCOPE_TEMPLATE,
@@ -88,6 +89,10 @@ _BACKEND: VaultBackend = LocalVaultBackend()
 # the value) means the fingerprint is not a confirmation oracle: an observer of a
 # fingerprint cannot offline-test a guessed secret without this in-process key.
 _FP_KEY: bytes = os.urandom(32)
+
+# Per-token spending accumulator for budget enforcement. Keyed by token_id so a
+# new Run (which issues a fresh token) resets the counter automatically.
+_TOKEN_SPENDING: dict[str, float] = {}
 
 
 def set_backend(backend: VaultBackend) -> None:
@@ -152,6 +157,11 @@ def available_services() -> list[str]:
     return list(BROKER_SERVICES.keys())
 
 
+def get_token_spending(token_id: str) -> float:
+    """Total amount charged against this token so far (for audit/display)."""
+    return _TOKEN_SPENDING.get(token_id, 0.0)
+
+
 # --------------------------------------------------------------------------- #
 # Brokered call
 # --------------------------------------------------------------------------- #
@@ -183,6 +193,25 @@ def call(
     if scope_services is not None and service not in scope_services:
         return BROKER_OUT_OF_SCOPE_TEMPLATE.format(service=service)
 
+    # Budget enforcement: reject charges that would exceed the token's spending cap.
+    spending_limit = getattr(token.scope, "spending_limit_usd", None) if token is not None else None
+    if spending_limit is not None and payload is not None:
+        try:
+            amount = float(payload.get("amount_usd", 0))
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount > 0:
+            track_key = token.token_id if token is not None else session_id
+            current = _TOKEN_SPENDING.get(track_key, 0.0)
+            if current + amount > spending_limit:
+                return BROKER_BUDGET_EXCEEDED_TEMPLATE.format(
+                    service=service,
+                    amount=amount,
+                    spent=current,
+                    limit=spending_limit,
+                )
+            _TOKEN_SPENDING[track_key] = current + amount
+
     lease = lease_secret(spec["secret_ref"])
     if lease is None:
         return BROKER_NO_CREDENTIAL_TEMPLATE.format(secret_ref=spec["secret_ref"])
@@ -208,7 +237,15 @@ def call(
             files_read=[],
         )
 
-    detail = spec["response"].format(action=action_str)
+    amount_str = ""
+    if payload is not None:
+        raw_amount = payload.get("amount_usd")
+        if raw_amount is not None:
+            try:
+                amount_str = f" Amount charged: ${float(raw_amount):.2f}."
+            except (TypeError, ValueError):
+                pass
+    detail = spec["response"].format(action=action_str) + amount_str
     # The lease falls out of scope here — the value is neither stored nor returned.
     return BROKER_RESULT_TEMPLATE.format(
         label=spec["label"],

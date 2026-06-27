@@ -360,6 +360,15 @@ BROKER_NO_CREDENTIAL_TEMPLATE = (
 # capability token (no content to semantically judge — the broker enforces it).
 BROKER_AUTHORIZED_REASON = "authorized by capability scope (brokered access)"
 
+# Budget enforcement: returned when a call_api charge would exceed the token's
+# spending limit. The transaction is not processed.
+BROKER_BUDGET_EXCEEDED_TEMPLATE = (
+    "[SYSTEM] call_api blocked by capability scope: spending limit exceeded.\n"
+    "Attempted: ${amount:.2f} on '{service}'\n"
+    "Spent so far (this agent): ${spent:.2f} / ${limit:.2f} limit\n"
+    "This transaction was not processed."
+)
+
 # Client-side brokered-access tool. The model picks a service + action; the
 # harness leases the credential at runtime via the broker and returns only the
 # result. Note the schema has NO field for a credential — the model cannot supply,

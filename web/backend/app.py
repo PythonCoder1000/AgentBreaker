@@ -26,6 +26,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Request, Response
 
 # Session IDs flow into file paths (audit log) and dict keys — restrict to
@@ -100,7 +102,8 @@ class Run:
     session's stored history with `task` (the new user message)."""
 
     def __init__(self, session: str, agent: str, task: str, history: list,
-                 email_replies: list, loop: asyncio.AbstractEventLoop, api_key: str) -> None:
+                 email_replies: list, loop: asyncio.AbstractEventLoop, api_key: str,
+                 spending_limit_usd: Optional[float] = None) -> None:
         self.session = session
         self.agent = agent
         self.task = task
@@ -108,6 +111,7 @@ class Run:
         self.messages: list = []  # built by the engine; persisted on clean completion
         self.loop = loop
         self.queue: asyncio.Queue = asyncio.Queue()
+        self._spending_limit_usd = spending_limit_usd
         self.client = engine.anthropic.Anthropic(api_key=api_key)
         self.system = engine.build_system_prompt(include_rules=(agent == "prompt"))
         # Issue a capability token for the Breaker Agent and wire it into the
@@ -120,6 +124,7 @@ class Run:
                     tools=DEFAULT_SCOPE_TOOLS,
                     bash_allowed=True,
                     max_depth=SUBAGENT_MAX_DEPTH,
+                    spending_limit_usd=spending_limit_usd,
                 ),
                 ttl_seconds=IDENTITY_TOKEN_TTL_SECONDS,
             )
@@ -332,7 +337,8 @@ async def stream(agent: str, session: str, scenario: str | None = None, message:
         raise HTTPException(status_code=400, detail="agent must be 'prompt' or 'breaker'")
     if (session, agent) in REVOKED_SESSIONS:
         raise HTTPException(status_code=403, detail="session token has been revoked")
-    if message and message.strip():     # a free-text chat message wins over a preset
+    sc = None
+    if message and message.strip():
         task, replies = message, []
     elif scenario:
         sc = scenarios.get_scenario(scenario)
@@ -350,7 +356,9 @@ async def stream(agent: str, session: str, scenario: str | None = None, message:
     if previous is not None:            # same session+agent reconnecting: stop the old one
         previous.cancel()
     history = HISTORY.get(key, [])      # continue the session's conversation
-    run = Run(session, agent, task, history, replies, asyncio.get_running_loop(), api_key)
+    spending_limit = sc.spending_limit_usd if sc is not None else None
+    run = Run(session, agent, task, history, replies, asyncio.get_running_loop(), api_key,
+              spending_limit_usd=spending_limit)
     RUNS[key] = run
     if getattr(run, "token", None) is not None:
         SESSION_TOKENS[key] = run.token  # so the token stays revocable after the run ends
