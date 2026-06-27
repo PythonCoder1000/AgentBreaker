@@ -18,6 +18,8 @@ import secrets
 import signal
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 try:  # readline (stdlib) gives input() arrow-key line editing & history
@@ -34,9 +36,11 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.spinner import Spinner
+from rich.table import Table
 from rich.text import Text
 
 from settings import (
+    AGENT_NAME,
     AGENT_NO_CONTENT_NOTICE,
     AGENT_PREFIX,
     AGENT_RULES,
@@ -53,11 +57,14 @@ from settings import (
     BASH_TIMEOUT_SECONDS,
     BASH_TRUNCATED_NOTE,
     CLIENT_PREFIX,
+    COLOR_ALLOW,
     COLOR_BANNER,
+    COLOR_BLOCK,
     COLOR_DIM,
     COLOR_TOOL,
     CONTACTS,
     CONTACTS_DIRECTORY_HEADER,
+    DEFAULT_SCOPE_TOOLS,
     EMAIL_ATTACHED_CLAUSE,
     EMAIL_BULLET,
     EMAIL_FENCE_NONCE_BYTES,
@@ -65,13 +72,16 @@ from settings import (
     EMAIL_MISSING_ATTACHMENT_CLAUSE,
     EMAIL_NO_REPLY_TEMPLATE,
     EMAIL_REPLY_TEMPLATE,
+    IDENTITY_TOKEN_TTL_SECONDS,
     LIVE_REFRESH_PER_SECOND,
     MAX_AGENT_STEPS,
     MAX_TOKENS,
     MODEL,
+    PRINCIPAL_NAME,
     RESULT_PREFIX,
     SEARCHING_LABEL,
     SPINNER_STYLE,
+    SUBAGENT_MAX_DEPTH,
     SYSTEM_PROMPT,
     TESTING_ENV_DIRNAME,
     THINKING_LABEL,
@@ -86,7 +96,10 @@ from settings import (
     VERSIONS,
     WORKSPACE_TREE_HEADER,
 )
+import broker
+import inspector
 from context import format_for_agent, workspace_tree
+from identity import CapabilityToken, Scope, derive_token, generate_token, tools_for_scope
 from intercepter import InterceptContext, evaluate
 
 # Repo root (this file lives in src/, so the root is one level up).
@@ -377,6 +390,147 @@ def _handle_send_email(console: Console, tool_input: dict) -> str:
     )
 
 
+def _handle_call_api(
+    console: Console, tool_input: dict, intercept_ctx: InterceptContext | None
+) -> str:
+    """Make a brokered service call: the access layer leases the credential at
+    runtime, authenticates the call, and returns only the result. The agent never
+    receives the secret — it never enters this function's return value."""
+    service = str(tool_input.get("service", ""))
+    action = str(tool_input.get("action", ""))
+    raw_payload = tool_input.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else None
+
+    token = intercept_ctx.token if intercept_ctx is not None else None
+    session_id = intercept_ctx.session_id if intercept_ctx is not None else ""
+    agent_name = token.agent_name if token is not None else "agent"
+    task = intercept_ctx.task if intercept_ctx is not None else ""
+
+    result = broker.call(
+        service, action, payload,
+        token=token, session_id=session_id, agent_name=agent_name, task=task,
+    )
+
+    call_line = Text()
+    call_line.append(TOOL_BULLET, style=COLOR_TOOL)
+    call_line.append(" call_api", style="bold")
+    target = Text(RESULT_PREFIX, style=COLOR_DIM)
+    target.append(f"{_sanitize(service)} · {_sanitize(action)}")
+    note = Text(RESULT_PREFIX, style=COLOR_DIM)
+    note.append("credential brokered at runtime — never entered the agent's context")
+    console.print()
+    console.print(Group(call_line, target, note))
+    return result
+
+
+def _print_token_panel(console: Console, token: CapabilityToken) -> None:
+    """Render the active capability token as a compact identity panel."""
+    scope = token.scope
+    expires_in = max(0, int(token.expires_at - time.time()))
+    expires_str = f"{expires_in // 3600}h {(expires_in % 3600) // 60}m"
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style=COLOR_DIM, no_wrap=True)
+    grid.add_column(overflow="fold")
+    grid.add_row("Token", Text(token.token_id[:8], style="bold"))
+    grid.add_row("Principal", Text(token.principal, style="bold"))
+    grid.add_row("Agent", token.agent_name)
+    grid.add_row("Expires", expires_str)
+    grid.add_row("Tools", ", ".join(scope.tools))
+    grid.add_row("Bash", "✓ enabled" if scope.bash_allowed else "✗ disabled")
+    if scope.email_to is not None:
+        grid.add_row("Email to", ", ".join(scope.email_to))
+    if scope.allowed_paths is not None:
+        grid.add_row("Paths", ", ".join(scope.allowed_paths))
+    grid.add_row("Max depth", str(scope.max_depth))
+
+    console.print()
+    console.print(
+        Panel(
+            grid,
+            title=Text("● Identity Token — ACTIVE", style=f"bold {COLOR_ALLOW}"),
+            title_align="left",
+            border_style=COLOR_ALLOW,
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+
+
+def _handle_spawn_subagent(
+    client: anthropic.Anthropic,
+    console: Console,
+    tool_input: dict,
+    parent_ctx: InterceptContext | None,
+    system: str,
+) -> str:
+    """Spawn a child agent with a derived capability token and return its response."""
+    task = str(tool_input.get("task", ""))
+    # The model can violate the tool's input_schema (it isn't hard-enforced), so a
+    # non-dict scope / non-list fields must not crash the dispatch loop — a raised
+    # exception here would leave a committed tool_use with no tool_result and brick
+    # the whole conversation. Coerce to safe shapes.
+    scope_input = tool_input.get("scope")
+    if not isinstance(scope_input, dict):
+        scope_input = {}
+
+    if parent_ctx is not None and parent_ctx.token is not None:
+        parent_token = parent_ctx.token
+        # max_depth check is also enforced at tier 0, but verify here for a
+        # clear user-facing message before the nested loop even starts.
+        if parent_token.scope.max_depth <= 0:
+            return "[SYSTEM] spawn_subagent blocked: this token does not permit spawning sub-agents (max_depth=0)."
+
+        req_tools = scope_input.get("tools")
+        if not isinstance(req_tools, list):
+            req_tools = list(parent_token.scope.tools)
+        req_email = scope_input.get("email_to")
+        if req_email is not None and not isinstance(req_email, list):
+            req_email = None
+        requested_scope = Scope(
+            tools=req_tools,
+            bash_allowed=bool(scope_input.get("bash_allowed", parent_token.scope.bash_allowed)),
+            email_to=req_email,
+            max_depth=parent_token.scope.max_depth - 1,
+        )
+        child_token = derive_token(
+            parent_token,
+            f"SubAgent-d{parent_token.depth + 1}",
+            requested_scope,
+            ttl_seconds=IDENTITY_TOKEN_TTL_SECONDS,
+        )
+        child_ctx = InterceptContext(token=child_token, session_id=parent_ctx.session_id)
+        _print_token_panel(console, child_token)
+    else:
+        child_token = None
+        child_ctx = None
+
+    console.print()
+    console.print(Text(f"  ↳ Sub-agent task: {task[:100]}", style=COLOR_DIM))
+
+    # Run a nested agent loop. child_ctx (and its token) gates every tool call
+    # the sub-agent makes through the same interceptor.
+    working: list[dict] = [{"role": "user", "content": task}]
+    stream_turn(client, working, console, system, child_ctx)
+
+    for msg in reversed(working):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return f"[SYSTEM] Sub-agent completed.\n\nSub-agent response:\n{content}"
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    parts.append(b["text"])
+                elif hasattr(b, "type") and b.type == "text":
+                    parts.append(b.text)
+            if parts:
+                return f"[SYSTEM] Sub-agent completed.\n\nSub-agent response:\n{''.join(parts)}"
+    return "[SYSTEM] Sub-agent completed with no text response."
+
+
 def stream_turn(
     client: anthropic.Anthropic,
     messages: list[dict],
@@ -399,6 +553,7 @@ def stream_turn(
     produced_text = False
     sent_email = False
     did_bash = False
+    did_call_api = False
     did_intercept = False
 
     for _ in range(MAX_AGENT_STEPS):
@@ -424,11 +579,18 @@ def stream_turn(
             vertical_overflow="visible",
         ) as live:
             try:
+                # Filter tools by the active token's scope so the model only
+                # sees tools it's actually permitted to call.
+                active_tools = (
+                    tools_for_scope(TOOLS, intercept_ctx.token.scope)
+                    if intercept_ctx is not None and intercept_ctx.token is not None
+                    else TOOLS
+                )
                 with client.messages.stream(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
                     system=system,
-                    tools=TOOLS,
+                    tools=active_tools,
                     messages=messages,
                 ) as stream:
                     for event in stream:
@@ -501,6 +663,11 @@ def stream_turn(
                 elif name == "run_bash":
                     did_bash = True
                     result = _handle_run_bash(console, inp)
+                elif name == "call_api":
+                    did_call_api = True
+                    result = _handle_call_api(console, inp, intercept_ctx)
+                elif name == "spawn_subagent":
+                    result = _handle_spawn_subagent(client, console, inp, intercept_ctx, system)
                 else:
                     tool_results.append(
                         {
@@ -534,7 +701,24 @@ def stream_turn(
         # (the loop may have just appended a dangling tool_result user turn).
         messages.append({"role": "assistant", "content": AGENT_STEP_LIMIT_NOTICE})
 
-    return produced_text or sent_email or did_bash or did_intercept
+    return produced_text or sent_email or did_bash or did_call_api or did_intercept
+
+
+def _print_context_scan(console: Console, messages: list[dict]) -> None:
+    """Scan the full model context for any credential and print the verdict — the
+    live proof that the secret never entered the model's context."""
+    report = inspector.scan_messages(messages, broker.live_secret_values())
+    if report["clean"]:
+        console.print(
+            Text("🔒 context scan: clean — no credential is present in the model's context",
+                 style=COLOR_ALLOW)
+        )
+    else:
+        labels = ", ".join(f"{f['label']} ({f['preview']})" for f in report["findings"])
+        console.print(
+            Text(f"🚨 context scan: {report['count']} secret(s) exposed in the model's context — {labels}",
+                 style=COLOR_BLOCK)
+        )
 
 
 def _select_version(console: Console) -> str:
@@ -576,9 +760,22 @@ def main() -> None:
 
     version = _select_version(console)
     include_rules = version == VERSION_PROMPT_AGENT  # only the Prompt Agent gets AGENT_RULES
-    # Only the Breaker Agent routes its tool calls through the policy evaluator.
-    intercept_ctx = InterceptContext() if version == VERSION_BREAKER_AGENT else None
     version_name = next(v["name"] for v in VERSIONS if v["key"] == version)
+
+    # Issue a per-session capability token for the Breaker Agent and wire it into
+    # the intercept context so tier 0 of the policy evaluator can validate it.
+    session_id = str(uuid.uuid4())[:8]
+    if version == VERSION_BREAKER_AGENT:
+        session_token = generate_token(
+            agent_name=AGENT_NAME,
+            principal=PRINCIPAL_NAME,
+            scope=Scope(tools=DEFAULT_SCOPE_TOOLS, bash_allowed=True, max_depth=SUBAGENT_MAX_DEPTH),
+            ttl_seconds=IDENTITY_TOKEN_TTL_SECONDS,
+        )
+        intercept_ctx = InterceptContext(token=session_token, session_id=session_id)
+    else:
+        session_token = None
+        intercept_ctx = None
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -595,9 +792,11 @@ def main() -> None:
     console.print()
     console.rule(Text(f"AgentBreaker · {version_name}", style=COLOR_BANNER), style=COLOR_TOOL)
     console.print(
-        Text(f"model {MODEL}   ·   type 'exit' to quit", style=COLOR_DIM),
+        Text(f"model {MODEL}   ·   session {session_id}   ·   type 'exit' to quit", style=COLOR_DIM),
         justify="center",
     )
+    if session_token is not None:
+        _print_token_panel(console, session_token)
     console.print()
 
     while True:
@@ -642,6 +841,8 @@ def main() -> None:
 
         messages[:] = working  # commit the full exchange (incl. emails) to history
         print()  # blank line before the next prompt
+        _print_context_scan(console, messages)
+        print()
 
 
 if __name__ == "__main__":
