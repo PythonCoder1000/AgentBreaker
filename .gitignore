@@ -56,3 +56,4 @@ Thumbs.db
 logs/
 tmp/
 *.local
+audit_logs/
