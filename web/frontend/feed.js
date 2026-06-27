@@ -13,6 +13,25 @@ function Params({ params }) {
   return html`<div class="params">${rows}</div>`;
 }
 
+// The per-agent context inspector strip: live proof of whether any credential is
+// present in the model's context. Clean (green) for the brokered Breaker path;
+// "exposed" (red) when a secret was read into context (the Prompt Agent path).
+function ContextInspector({ scan }) {
+  if (!scan) return null;
+  if (scan.clean) {
+    return html`<div class="ctx-inspector clean">
+      <span class="ci-icon">🔒</span>
+      <span class="ci-text">Context inspector: <b>clean</b> — no credential is in the model's context</span>
+    </div>`;
+  }
+  const items = (scan.findings || []).map((f) => `${f.label} (${f.preview})`).join(", ");
+  const plural = scan.count === 1 ? "" : "s";
+  return html`<div class="ctx-inspector dirty">
+    <span class="ci-icon">🚨</span>
+    <span class="ci-text">Context inspector: <b>${scan.count} secret${plural} exposed</b> in the model's context${items ? " — " + items : ""}</span>
+  </div>`;
+}
+
 // A single feed event.
 function FeedItem({ ev, resolved, onDecide, onGrow }) {
   const [clicked, setClicked] = useState(null);
@@ -24,14 +43,20 @@ function FeedItem({ ev, resolved, onDecide, onGrow }) {
         <${Typewriter} text=${ev.text} onGrow=${onGrow} />
       </div>`;
 
-    case "tool_call":
-      return html`<div class="item tool-call">
-        <div class="tc-caption">The agent tried to:</div>
+    case "tool_call": {
+      const brokered = ev.tool === "call_api";
+      const caption = brokered
+        ? "The agent reached an external service through the access layer:"
+        : "The agent tried to:";
+      return html`<div class=${"item tool-call" + (brokered ? " brokered" : "")}>
+        <div class="tc-caption">${caption}</div>
         <div class="tc-head"><span class="glyph">⏺</span><span class="tname">${ev.tool}</span>
           ${ev.server ? html`<span style=${{ color: "var(--dim)", fontSize: "11px" }}>server-side</span>` : null}
+          ${brokered ? html`<span class="brokered-tag">🔑 credential never in context</span>` : null}
         </div>
         <${Params} params=${ev.params} />
       </div>`;
+    }
 
     case "tool_allowed":
       // The Prompt Agent has no enforced policy, so a call that actually moved or
@@ -99,13 +124,42 @@ function FeedItem({ ev, resolved, onDecide, onGrow }) {
         <pre>${ev.output}</pre>
       </details>`;
 
+    case "subagent_start": {
+      const t = ev.token;
+      const scopeStr = t ? `tools: ${(t.scope && t.scope.tools || []).join(", ")}` : "no token";
+      const depthStr = `depth ${ev.depth}`;
+      return html`<div class="item subagent-start">
+        <span class="vg">↳</span>
+        <div class="vbody">
+          <span class="vtitle">SUB-AGENT SPAWNED · ${depthStr}</span>
+          <span class="vreason">${ev.task}</span>
+          ${t ? html`<div class="tc-mini">
+            <span class="tc-mini-k">Token</span> <span class="tc-mini-v mono">${t.token_id}</span>
+            <span class="tc-mini-sep">·</span>
+            <span class="tc-mini-k">Derived from</span> <span class="tc-mini-v mono">${t.parent_token_id || "—"}</span>
+            <br />
+            <span class="tc-mini-k">Scope</span> <span class="tc-mini-v">${scopeStr}</span>
+          </div>` : null}
+        </div>
+      </div>`;
+    }
+
+    case "subagent_end":
+      return html`<div class="item subagent-end">
+        <span class="vg">✓</span>
+        <div class="vbody">
+          <span class="vtitle">SUB-AGENT RETURNED · depth ${ev.depth}</span>
+          ${ev.result ? html`<span class="vreason">${ev.result.slice(0, 200)}</span>` : null}
+        </div>
+      </div>`;
+
     default:
       return null;
   }
 }
 
 // One agent column: its event feed plus a composer that messages this agent only.
-export function Column({ kind, title, events, running, resetKey, onSend, onDecide }) {
+export function Column({ kind, title, events, running, resetKey, scan, onSend, onDecide }) {
   const feedRef = useRef(null);
   const prevLen = useRef(0);
   const [input, setInput] = useState("");
@@ -161,6 +215,7 @@ export function Column({ kind, title, events, running, resetKey, onSend, onDecid
       <span class="tag"></span>
       <h2>${title}</h2>
     </div>
+    <${ContextInspector} scan=${scan} />
     <div class="feed" ref=${feedRef}>
       ${events.length === 0 && !running
         ? html`<div class="empty">Press <b>RUN</b> for a preset, or message this agent below.</div>`

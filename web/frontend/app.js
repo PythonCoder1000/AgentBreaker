@@ -20,6 +20,10 @@ function App() {
   const [selected, setSelected] = useState(0);
   const [running, setRunning] = useState({ prompt: false, breaker: false });
   const [feeds, setFeeds] = useState({ prompt: [], breaker: [] });
+  // Per-agent identity token display objects (null until identity_issued arrives).
+  const [identity, setIdentity] = useState({ prompt: null, breaker: null });
+  // Per-agent context-inspector report (null until context_scan arrives).
+  const [scans, setScans] = useState({ prompt: null, breaker: null });
   // Bumped on every new run/session so both columns reset their scroll to the top.
   const [runSeq, setRunSeq] = useState(0);
 
@@ -54,6 +58,23 @@ function App() {
       // neither is rendered as a feed item.
       if (ev.type === "done") { finish(); return; }
       if (ev.type === "thinking") return;
+      // Identity events update the trust chain panel, not the event feed.
+      if (ev.type === "identity_issued") {
+        setIdentity((id) => ({ ...id, [agent]: ev.token }));
+        return;
+      }
+      if (ev.type === "identity_revoked") {
+        setIdentity((id) => ({
+          ...id,
+          [agent]: id[agent] ? { ...id[agent], revoked: true } : null,
+        }));
+        return;
+      }
+      // Context-inspector report updates the per-column strip, not the feed.
+      if (ev.type === "context_scan") {
+        setScans((s) => ({ ...s, [agent]: { clean: ev.clean, count: ev.count, findings: ev.findings } }));
+        return;
+      }
       setFeeds((f) => ({ ...f, [agent]: [...f[agent], ev] }));
     };
     es.onerror = finish;
@@ -69,9 +90,31 @@ function App() {
     }
     sessionRef.current = newId();
     setFeeds({ prompt: [], breaker: [] });
+    setIdentity({ prompt: null, breaker: null });
+    setScans({ prompt: null, breaker: null });
     setRunning({ prompt: false, breaker: false });
     setRunSeq((s) => s + 1);                       // reset both panels' scroll
   }, [closeStreams]);
+
+  // Revoke the capability token for one agent's current session.
+  const onRevoke = useCallback((agent) => {
+    if (!sessionRef.current) return;
+    fetch("/api/revoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: sessionRef.current, agent }),
+    }).catch(() => {});
+  }, []);
+
+  // Verify the tamper-evident audit chain for the current session. Returns a
+  // promise of {ok, length, broken_at, reason} (or null on failure).
+  const onVerifyAudit = useCallback(() => {
+    const id = sessionRef.current;
+    if (!id) return Promise.resolve(null);
+    return fetch(`/api/audit/${encodeURIComponent(id)}/verify`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }, []);
 
   const runScenario = useCallback((idx) => {
     if (!scenarios.length) return;
@@ -113,9 +156,9 @@ function App() {
       ? html`<${HomeView} scenarios=${scenarios} setView=${setView} />`
       : html`<${ChatView}
           scenarios=${scenarios} selected=${selected} setSelected=${setSelected}
-          running=${running} feeds=${feeds} runSeq=${runSeq}
+          running=${running} feeds=${feeds} runSeq=${runSeq} identity=${identity} scans=${scans}
           runScenario=${runScenario} sendToAgent=${sendToAgent} newSession=${newSession}
-          onDecide=${onDecide} />`}
+          onDecide=${onDecide} onRevoke=${onRevoke} onVerifyAudit=${onVerifyAudit} />`}
   </div>`;
 }
 

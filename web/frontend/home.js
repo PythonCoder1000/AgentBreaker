@@ -33,22 +33,23 @@ function AgentCard({ kind, name, approach, blurb }) {
 export function HomeView({ scenarios, setView }) {
   return html`<div class="home">
     <section class="hero">
-      <div class="eyebrow">Agent security · live comparison</div>
-      <h2>Prompt rules vs. an enforced policy layer</h2>
-      <p class="lead">Both agents get the same tasks, the same tools, and the same environment.
-        The only thing that differs is <em>how</em> each one is kept in check — so you can watch
-        where each holds the line, and where one quietly doesn't.</p>
+      <div class="eyebrow">Agent access &middot; identity &middot; accountability</div>
+      <h2>When an agent acts, where does its access come from?</h2>
+      <p class="lead">Every agent needs credentials, but none of them should <em>hold</em> the keys.
+        Both agents get the same tasks, tools, and environment; the difference is whether access is
+        an <em>enforced, scoped, brokered</em> capability — or just rules in a prompt and a secret
+        sitting in a file. Watch where each holds the line, and where one quietly doesn't.</p>
     </section>
 
     <section class="agent-cards">
       <${AgentCard} kind="prompt"
         name="Prompt Agent"
-        approach="Guardrails written into the system prompt"
-        blurb=${"The conventional approach. Its safety rules are spelled out in plain language inside the model's prompt, and the agent is asked to follow them. That covers the cases the rules anticipated — but those rules live inside the very model they're meant to restrain, so a request phrased the right way can walk straight past them."} />
+        approach="Guardrails in the prompt, credentials in a file"
+        blurb=${"The conventional approach. Its safety rules are written in plain language inside the model's prompt, and the secrets it needs sit in a .env file in its workspace. A request phrased the right way walks past the rules — and the moment the agent reads that file, the credential is in the model's context, where one injected instruction can carry it out the door."} />
       <${AgentCard} kind="breaker"
         name="Breaker Agent"
-        approach="An enforced policy layer outside the model"
-        blurb=${"Carries no safety rules in its prompt at all. Instead, every tool call is intercepted and judged by a dedicated security framework: deterministic blocks for known-dangerous actions, plus a content-aware review that reads what a call would actually expose. Enforcement never depends on the model choosing to comply."} />
+        approach="A scoped capability token + a runtime access layer"
+        blurb=${"Carries no rules and holds no keys. It acts under a scoped, revocable capability token, and reaches real systems through call_api — an access layer that leases the credential at runtime, uses it, and returns only the result, so the secret never enters the model's context. Every tool call is still judged by an enforced policy layer, and every access is written to a tamper-evident audit log. Even a fully hijacked loop has nothing to steal."} />
     </section>
 
     <section class="results">
