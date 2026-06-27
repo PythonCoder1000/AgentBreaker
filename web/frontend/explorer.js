@@ -57,7 +57,7 @@ function FileViewer({ path, onClose }) {
       <div class="viewer-body">
         ${err ? html`<div class="err">${err}</div>`
           : !data ? html`<div class="empty">loading…</div>`
-          : data.binary ? html`<div class="empty">Binary file — can't display.</div>`
+          : data.binary ? html`<div class="empty">Binary file - can't display.</div>`
           : html`<pre class="viewer-pre">${data.content}${data.truncated ? "\n\n… truncated …" : ""}</pre>`}
       </div>
     </div>

@@ -48,7 +48,7 @@ function describe(ev, agent) {
         // exposed secrets still "ran". Render it red so an exfiltration never
         // reads as a green success.
         if (ev.tool === "send_email")
-          return { box: "leak", icon: "🚨", title: "SENT: secret left the sandbox", sub: "Nothing checked it — the action ran and carried sensitive data out.", badge: "leak", badgeText: "LEAKED" };
+          return { box: "leak", icon: "🚨", title: "SENT: secret left the sandbox", sub: "Nothing checked it - the action ran and carried sensitive data out.", badge: "leak", badgeText: "LEAKED" };
         return { box: "leak", icon: "✅", title: "ALLOWED, but nothing checked it", sub: "This read touched a secret path; its contents are now in the model's context." };
       }
       if (ev.tool === "web_search") return null; // already shown as a server-side tool_call

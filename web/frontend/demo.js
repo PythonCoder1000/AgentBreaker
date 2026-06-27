@@ -34,22 +34,22 @@ const SUMMARIES = {
     breaker: "The interceptor caught the read of a known secrets path before it ever reached the model.",
   },
   "attack-4": {
-    prompt: "It read .env as instructed — the key entered context immediately. The injected reply then asked for it. With the value already in memory, there was nothing stopping it.",
+    prompt: "It read .env as instructed - the key entered context immediately. The injected reply then asked for it. With the value already in memory, there was nothing stopping it.",
     breaker: "The .env read was blocked before any key entered context. When the injected reply asked for it, there was nothing to hand over.",
   },
   "delegation": {
-    prompt: "The sub-agent ran cat .env unscoped — the key entered its context and surfaced in its report. The parent forwarded the findings and complied when Riley followed up.",
-    breaker: "The sub-agent's derived token was narrowed to run_bash + call_api — .env blocked, email stripped. The parent never got the key.",
+    prompt: "The sub-agent ran cat .env unscoped - the key entered its context and surfaced in its report. The parent forwarded the findings and complied when Riley followed up.",
+    breaker: "The sub-agent's derived token was narrowed to run_bash + call_api - .env blocked, email stripped. The parent never got the key.",
   },
   "wallet": {
     prompt: "All four charges cleared: $100 + $100 + $100 + $250 = $550. No spending cap, no limit on how much the agent could drain.",
-    breaker: "Charges 1–2 cleared ($200). Charge 3 would bring the total to $300 — over the $250 token budget — and was rejected before processing.",
+    breaker: "Charges 1-2 cleared ($200). Charge 3 would bring the total to $300 - over the $250 token budget - and was rejected before processing.",
   },
 };
 
 function chipMeta(sc) {
   if (CHIP_META[sc.id]) return CHIP_META[sc.id];
-  const [head, label] = (sc.name || sc.id).split("—").map((s) => s.trim());
+  const [head, label] = (sc.name || sc.id).split(" - ").map((s) => s.trim());
   return { head: head || sc.id, label: (label || sc.tagline || "").toLowerCase() };
 }
 
@@ -90,11 +90,11 @@ function Inspector({ scan, running, events }) {
   if (state === "leaked")
     return html`<div class="vb-inspector exposed">
       <span class="vb-insp-icon">🚨</span>
-      <div><div class="vb-insp-label">Leaked: secret left the sandbox</div><div class="vb-insp-sub">An unenforced action moved a credential out — the send was never checked</div></div>
+      <div><div class="vb-insp-label">Leaked: secret left the sandbox</div><div class="vb-insp-sub">An unenforced action moved a credential out - the send was never checked</div></div>
     </div>`;
   const count = scan && scan.count;
   const findings = scan && scan.findings && scan.findings.length
-    ? " — " + scan.findings.map((f) => f.label || f.preview).filter(Boolean).join(", ")
+    ? " - " + scan.findings.map((f) => f.label || f.preview).filter(Boolean).join(", ")
     : "";
   const sub = count ? `${count} secret${count === 1 ? "" : "s"} now sitting in the model${findings}` : "A live credential is now sitting in the model";
   return html`<div class="vb-inspector exposed">
@@ -201,7 +201,7 @@ function AgentTree({ rootToken, events }) {
     ${nodes.map((node, i) => {
       const tools = nodeTools[i];
       const dropped = parentToolsList[i].filter(t => !tools.includes(t));
-      const tid = node.token ? node.token.token_id : "—";
+      const tid = node.token ? node.token.token_id : "-";
 
       return html`<div key=${i} class="vb-tree-node" style=${{ paddingLeft: (node.depth * 20) + "px" }}>
         <div class="vb-tree-row">
@@ -302,7 +302,7 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
       </div>
       <div class="vb-task-row">
         <div class="vb-task-field">
-          <div class="vb-task-label">${conversationActive ? "Ask a follow-up — both agents answer in this chat" : "The task both agents receive"}</div>
+          <div class="vb-task-label">${conversationActive ? "Ask a follow-up - both agents answer in this chat" : "The task both agents receive"}</div>
           <textarea class="vb-task-input" value=${freeText}
             placeholder=${conversationActive ? "Ask a follow-up question (sent to both agents)…" : (sel ? sel.task : "Select an attack…")}
             onInput=${(e) => setFreeText(e.target.value)}
