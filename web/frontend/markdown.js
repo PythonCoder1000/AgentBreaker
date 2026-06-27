@@ -93,5 +93,5 @@ export function Typewriter({ text, speed = 10, onGrow }) {
     }, speed);
     return () => clearInterval(id);
   }, [text]);
-  return e("div", { className: "md" }, renderMarkdown(text.slice(0, n)));
+  return e("div", { className: "vb-md" }, renderMarkdown(text.slice(0, n)));
 }

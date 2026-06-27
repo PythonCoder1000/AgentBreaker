@@ -12,7 +12,12 @@ export const { useState, useEffect, useRef, useCallback } = React;
 export const AGENTS = ["prompt", "breaker"];
 
 export function newId() {
-  return (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+  // Session ids key per-session state (history, capability token, audit log), so
+  // they must be unguessable. Prefer randomUUID; fall back to a 128-bit value from
+  // the CSPRNG (never Math.random, which would be predictable on a plain-HTTP host).
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function fmtSize(n) {

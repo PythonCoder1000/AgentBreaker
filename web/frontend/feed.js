@@ -1,240 +1,181 @@
-// The live event feed for one agent: a column of feed items (tool calls,
-// verdicts, escalations, agent/user bubbles) that auto-scrolls as it grows.
-import { html, useState, useRef, useEffect } from "./ui.js";
+// Maps the real backend SSE events into the Vault Boundary "box" vocabulary and
+// renders one agent's live event feed. The backend (engine.py) streams the same
+// events the CLI harness produces; here each is given a design box style:
+//   user (violet) · tool (neutral) · broker (blue) · allow (green) ·
+//   block (green — a blocked attack is a WIN) · leak (red) · esc (amber) ·
+//   answer (neutral card) · inject (amber dashed).
+import { html, useRef, useEffect, useState } from "./ui.js";
 import { Typewriter } from "./markdown.js";
 
-// One tool call's parameters.
-function Params({ params }) {
-  if (!params) return null;
-  const rows = Object.entries(params).map(([k, v]) => {
-    const val = Array.isArray(v) ? v.join(", ") : String(v);
-    return html`<div class="row" key=${k}><span class="k">${k}</span>  ${val}</div>`;
-  });
-  return html`<div class="params">${rows}</div>`;
+const AGENT_LABEL = { prompt: "Prompt Agent", breaker: "Breaker Agent" };
+
+// One tool call's parameters flattened to a single readable line.
+function paramLine(params) {
+  if (!params) return "";
+  return Object.entries(params)
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`)
+    .join(" · ");
 }
 
-// The per-agent context inspector strip: live proof of whether any credential is
-// present in the model's context. Clean (green) for the brokered Breaker path;
-// "exposed" (red) when a secret was read into context (the Prompt Agent path).
-function ContextInspector({ scan }) {
-  if (!scan) return null;
-  if (scan.clean) {
-    return html`<div class="ctx-inspector clean">
-      <span class="ci-icon">🔒</span>
-      <span class="ci-text">Context inspector: <b>clean</b> — no credential is in the model's context</span>
-    </div>`;
-  }
-  const items = (scan.findings || []).map((f) => `${f.label} (${f.preview})`).join(", ");
-  const plural = scan.count === 1 ? "" : "s";
-  return html`<div class="ctx-inspector dirty">
-    <span class="ci-icon">🚨</span>
-    <span class="ci-text">Context inspector: <b>${scan.count} secret${plural} exposed</b> in the model's context${items ? " — " + items : ""}</span>
-  </div>`;
-}
-
-// A single feed event.
-function FeedItem({ ev, resolved, onDecide, onGrow }) {
-  const [clicked, setClicked] = useState(null);
-
+// Translate one feed event into a render spec, or null if it isn't a feed item
+// (thinking / identity / context_scan / done are handled by the app shell).
+function describe(ev, agent) {
   switch (ev.type) {
     case "user_message":
-      return html`<div class="item bubble user">
-        <span class="who">Injected prompt</span>
-        <${Typewriter} text=${ev.text} onGrow=${onGrow} />
-      </div>`;
+      return { box: "user", icon: "🧑", title: "TASK", text: ev.text, markdown: true };
 
     case "tool_call": {
-      const brokered = ev.tool === "call_api";
-      const caption = brokered
-        ? "The agent reached an external service through the access layer:"
-        : "The agent tried to:";
-      return html`<div class=${"item tool-call" + (brokered ? " brokered" : "")}>
-        <div class="tc-caption">${caption}</div>
-        <div class="tc-head"><span class="glyph">⏺</span><span class="tname">${ev.tool}</span>
-          ${ev.server ? html`<span style=${{ color: "var(--dim)", fontSize: "11px" }}>server-side</span>` : null}
-          ${brokered ? html`<span class="brokered-tag">🔑 credential never in context</span>` : null}
-        </div>
-        <${Params} params=${ev.params} />
-      </div>`;
+      const p = ev.params || {};
+      if (ev.tool === "call_api") {
+        const sub = paramLine({ service: p.service, action: p.action, ...(p.payload ? { payload: p.payload } : {}) });
+        // The "key never in context" assurance belongs to the Breaker's brokered
+        // path. The Prompt Agent calling the same tool is rendered as a neutral
+        // tool call — we don't make the secure-design claim in the insecure column.
+        if (agent === "breaker")
+          return { box: "broker", icon: "🔧", title: "call_api", sub, mono: true, badge: "cred", badgeText: "🔑 key never in context" };
+        return { box: "tool", icon: "🔧", title: "call_api", sub, mono: true };
+      }
+      if (ev.tool === "run_bash") return { box: "tool", icon: "🔧", title: "run_bash", sub: p.command || "", mono: true };
+      if (ev.tool === "send_email") return { box: "tool", icon: "🔧", title: "send_email", sub: paramLine(p), mono: true };
+      if (ev.tool === "web_search") return { box: "tool", icon: "🔍", title: "web_search", sub: p.query || "", mono: true, badgeText: ev.server ? "server-side" : null };
+      if (ev.tool === "spawn_subagent") return { box: "tool", icon: "🌳", title: "spawn_subagent", sub: p.task || paramLine(p) };
+      return { box: "tool", icon: "🔧", title: ev.tool, sub: paramLine(p), mono: true };
     }
 
-    case "tool_allowed":
-      // The Prompt Agent has no enforced policy, so a call that actually moved or
-      // exposed secrets still "runs" — flag it red (not green) so an exfiltration
-      // doesn't read as a success. The word ALLOWED stays (the tool did allow it).
+    case "tool_allowed": {
       if (ev.danger) {
-        const tag = ev.tool === "send_email" ? "🚨 LEAKED" : "⚠ SECRETS EXPOSED";
-        return html`<div class="item verdict allowed danger">
-          <span class="vg">🚨</span>
-          <div class="vbody">
-            <span class="vtitle">ALLOWED · ${ev.tool} <span class="danger-tag">${tag}</span></span>
-            <span class="vreason">No policy stopped this — the action ran and moved sensitive data.</span>
-          </div>
-        </div>`;
+        // The Prompt Agent has no enforced policy: a call that actually moved or
+        // exposed secrets still "ran". Render it red so an exfiltration never
+        // reads as a green success.
+        if (ev.tool === "send_email")
+          return { box: "leak", icon: "🚨", title: "SENT: secret left the sandbox", sub: "Nothing checked it — the action ran and carried sensitive data out.", badge: "leak", badgeText: "LEAKED" };
+        return { box: "leak", icon: "✅", title: "ALLOWED, but nothing checked it", sub: "This read touched a secret path; its contents are now in the model's context." };
       }
-      return html`<div class="item verdict allowed">
-        <span class="vg">✓</span>
-        <div class="vbody"><span class="vtitle">ALLOWED · ${ev.tool}</span>
-          ${ev.reason ? html`<span class="vreason">${ev.reason}</span>` : null}
-        </div>
-      </div>`;
+      if (ev.tool === "web_search") return null; // already shown as a server-side tool_call
+      return { box: "allow", icon: "✅", title: `ALLOWED · ${ev.tool}`, sub: ev.reason || "" };
+    }
 
     case "tool_blocked":
-      return html`<div class="item verdict blocked">
-        <span class="vg">🚨</span>
-        <div class="vbody"><span class="vtitle">BLOCKED · ${ev.tool}</span>
-          <span class="vreason">${ev.reason}</span>
-        </div>
-      </div>`;
+      // Color semantics: a blocked attack is GOOD → green + shield, never a red ⛔.
+      return { box: "block", icon: "🛡️", title: `BLOCKED · ${ev.tool}`, sub: ev.reason || "" };
 
-    case "tool_escalated": {
-      const decided = resolved?.outcome; // 'allowed' | 'blocked' once resolved
-      const pending = !decided && clicked === null;
-      return html`<div class="item verdict escalated">
-        <span class="vg">⚠️</span>
-        <div class="vbody" style=${{ flex: 1 }}>
-          <span class="vtitle">ESCALATION · ${ev.tool}</span>
-          <span class="vreason">${ev.reason}</span>
-          <${Params} params=${ev.params} />
-          ${pending
-            ? html`<div class="approve-row">
-                <button class="approve" onClick=${() => { setClicked("a"); onDecide(ev.call_id, true); }}>[ A ] Approve</button>
-                <button class="deny" onClick=${() => { setClicked("b"); onDecide(ev.call_id, false); }}>[ B ] Block</button>
-              </div>`
-            : html`<div class="resolved-note">${
-                decided === "allowed" || clicked === "a" ? "✓ approved" : "✗ blocked"
-              }</div>`}
-        </div>
-      </div>`;
-    }
+    case "tool_escalated":
+      return { box: "esc", icon: "⚠️", title: `NEEDS APPROVAL · ${ev.tool}`, sub: ev.reason || "", params: ev.params, escalation: true };
 
     case "agent_response":
-      return html`<div class="item bubble agent">
-        <span class="who">Agent</span>
-        <${Typewriter} text=${ev.text} onGrow=${onGrow} />
-      </div>`;
+      return { box: "answer", icon: "💬", title: AGENT_LABEL[agent] || "Agent", text: ev.text, markdown: true };
 
     case "error":
-      return html`<div class="item err">⚠ ${ev.message}</div>`;
-
-    case "tool_result":
-      if (!ev.output) return null;
-      return html`<details class="item output">
-        <summary>output</summary>
-        <pre>${ev.output}</pre>
-      </details>`;
+      return { box: "leak", icon: "⚠", title: "Engine error", sub: ev.message || "" };
 
     case "subagent_start": {
       const t = ev.token;
-      const scopeStr = t ? `tools: ${(t.scope && t.scope.tools || []).join(", ")}` : "no token";
-      const depthStr = `depth ${ev.depth}`;
-      return html`<div class="item subagent-start">
-        <span class="vg">↳</span>
-        <div class="vbody">
-          <span class="vtitle">SUB-AGENT SPAWNED · ${depthStr}</span>
-          <span class="vreason">${ev.task}</span>
-          ${t ? html`<div class="tc-mini">
-            <span class="tc-mini-k">Token</span> <span class="tc-mini-v mono">${t.token_id}</span>
-            <span class="tc-mini-sep">·</span>
-            <span class="tc-mini-k">Derived from</span> <span class="tc-mini-v mono">${t.parent_token_id || "—"}</span>
-            <br />
-            <span class="tc-mini-k">Scope</span> <span class="tc-mini-v">${scopeStr}</span>
-          </div>` : null}
-        </div>
-      </div>`;
+      const scope = t && t.scope ? `tools: ${(t.scope.tools || []).join(", ")}` : "no token";
+      return { box: "broker", icon: "↳", title: `SUB-AGENT SPAWNED · depth ${ev.depth}`, sub: `${ev.task || ""}\n${t ? `token ${t.token_id} · ${scope}` : ""}`.trim() };
     }
-
     case "subagent_end":
-      return html`<div class="item subagent-end">
-        <span class="vg">✓</span>
-        <div class="vbody">
-          <span class="vtitle">SUB-AGENT RETURNED · depth ${ev.depth}</span>
-          ${ev.result ? html`<span class="vreason">${ev.result.slice(0, 200)}</span>` : null}
-        </div>
-      </div>`;
+      return { box: "allow", icon: "✓", title: `SUB-AGENT RETURNED · depth ${ev.depth}`, sub: ev.result ? String(ev.result).slice(0, 200) : "" };
 
+    // tool_result is rendered as a collapsible <details>, handled below.
     default:
       return null;
   }
 }
 
-// One agent column: its event feed plus a composer that messages this agent only.
-export function Column({ kind, title, events, running, resetKey, scan, onSend, onDecide }) {
+function Badge({ kind, text }) {
+  if (!text) return null;
+  if (kind === "leak") return html`<span class="vb-ev-badge leak">${text}</span>`;
+  if (kind === "cred") return html`<span class="vb-ev-badge cred">${text}</span>`;
+  return html`<span class="vb-ev-badge cred" style=${{ background: "transparent", border: "1px solid var(--b6)", color: "var(--t-muted2)" }}>${text}</span>`;
+}
+
+// A single feed event.
+function EventBox({ ev, agent, resolved, onDecide, onGrow }) {
+  const [clicked, setClicked] = useState(null);
+
+  if (ev.type === "tool_result") {
+    if (!ev.output) return null;
+    return html`<details class="vb-ev-output"><summary>tool output</summary><pre>${ev.output}</pre></details>`;
+  }
+
+  const d = describe(ev, agent);
+  if (!d) return null;
+
+  const body = html`<div class="vb-ev-body">
+    <div class="vb-ev-title">${d.title}</div>
+    ${d.markdown
+      ? html`<${Typewriter} text=${d.text || ""} onGrow=${onGrow} />`
+      : d.sub
+      ? html`<div class=${"vb-ev-sub" + (d.mono ? " mono" : "")}>${d.sub}</div>`
+      : null}
+    ${d.escalation ? html`<${Escalation} ev=${ev} resolved=${resolved} clicked=${clicked} setClicked=${setClicked} onDecide=${onDecide} />` : null}
+  </div>`;
+
+  return html`<div class=${"vb-ev " + d.box}>
+    <div class="vb-ev-row">
+      <span class="vb-ev-icon">${d.icon}</span>
+      ${body}
+      <${Badge} kind=${d.badge} text=${d.badgeText} />
+    </div>
+  </div>`;
+}
+
+// Approve / Block controls for a Breaker-Agent escalation. Resolves to the real
+// /api/decision endpoint via onDecide; greys out once the run records a verdict.
+function Escalation({ ev, resolved, clicked, setClicked, onDecide }) {
+  const decided = resolved && resolved.outcome; // 'allowed' | 'blocked'
+  const pending = !decided && clicked === null;
+  if (pending) {
+    return html`<div class="vb-approve-row">
+      <button class="vb-approve" onClick=${() => { setClicked("a"); onDecide(ev.call_id, true); }}>Approve</button>
+      <button class="vb-deny" onClick=${() => { setClicked("b"); onDecide(ev.call_id, false); }}>Block</button>
+    </div>`;
+  }
+  const approved = decided === "allowed" || clicked === "a";
+  return html`<div class="vb-resolved">${approved ? "✓ approved" : "✗ blocked"}</div>`;
+}
+
+// One agent's scrollable event feed. Auto-scrolls to the bottom as events stream
+// in, jumps back to the top on a fresh run (events length drops), and follows a
+// typing answer only when already near the bottom.
+export function Feed({ agent, events, running, resetKey, onDecide }) {
   const feedRef = useRef(null);
   const prevLen = useRef(0);
-  const [input, setInput] = useState("");
+
   useEffect(() => {
     const el = feedRef.current;
     if (!el) return;
-    // A new run/session clears the feed (length drops to 0 / shrinks): jump back
-    // to the top so the first thing the audience sees is the start of the run.
-    // While the run streams (events only ever append), follow along to the bottom.
     if (events.length <= prevLen.current) el.scrollTop = 0;
     else el.scrollTop = el.scrollHeight;
     prevLen.current = events.length;
   }, [events]);
-  // Every new run/session bumps resetKey: force BOTH panels' scroll back to the
-  // top so the two columns start from the same place (they can otherwise sit at
-  // different scroll points from the previous run).
-  useEffect(() => {
-    if (feedRef.current) feedRef.current.scrollTop = 0;
-  }, [resetKey]);
-  // Keep the "thinking…" row in view as soon as a run starts.
-  useEffect(() => {
-    const el = feedRef.current;
-    if (el && running) el.scrollTop = el.scrollHeight;
-  }, [running]);
+  useEffect(() => { if (feedRef.current) feedRef.current.scrollTop = 0; }, [resetKey]);
+  useEffect(() => { const el = feedRef.current; if (el && running) el.scrollTop = el.scrollHeight; }, [running]);
 
-  // Follow text as a message types out — but only when already near the bottom,
-  // so a viewer who scrolled up to read isn't yanked back down. Without this a
-  // long final response types out below the fold and looks cut off mid-sentence.
   const onGrow = () => {
     const el = feedRef.current;
     if (!el) return;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 140) {
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 140)
       requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-    }
   };
 
-  // map escalation call_id -> outcome, from later allowed/blocked events
+  // Map escalation call_id -> outcome from later allowed/blocked events.
   const resolved = {};
   for (const ev of events) {
     if (ev.type === "tool_allowed" && ev.call_id) resolved[ev.call_id] = { outcome: "allowed" };
     if (ev.type === "tool_blocked" && ev.call_id) resolved[ev.call_id] = { outcome: "blocked" };
   }
 
-  const send = () => {
-    const text = input.trim();
-    if (!text || running) return;
-    setInput("");
-    onSend(text);
-  };
-
-  return html`<div class=${"column " + kind}>
-    <div class="column-head">
-      <span class="tag"></span>
-      <h2>${title}</h2>
-    </div>
-    <${ContextInspector} scan=${scan} />
-    <div class="feed" ref=${feedRef}>
-      ${events.length === 0 && !running
-        ? html`<div class="empty">Press <b>RUN</b> for a preset, or message this agent below.</div>`
-        : html`${events.map((ev, i) => html`<${FeedItem}
-            key=${i}
-            ev=${ev}
-            resolved=${ev.call_id ? resolved[ev.call_id] : null}
-            onGrow=${onGrow}
-            onDecide=${(callId, approve) => onDecide(kind, callId, approve)} />`)}
-          ${running ? html`<div class="item thinking"><span class="spinner"></span> thinking…</div>` : null}`}
-    </div>
-    <div class="col-composer">
-      <textarea rows="1"
-        placeholder=${"Message the " + title + "…"}
-        value=${input}
-        disabled=${running}
-        onInput=${(ev) => setInput(ev.target.value)}
-        onKeyDown=${(ev) => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); send(); } }} />
-      <button class="btn run" disabled=${running || !input.trim()} onClick=${send}>Send</button>
-    </div>
+  return html`<div class="vb-feed" ref=${feedRef}>
+    ${events.length === 0 && !running
+      ? html`<div class="vb-feed-empty">Run an attack to watch this agent act.</div>`
+      : html`${events.map((ev, i) => html`<${EventBox}
+          key=${i}
+          ev=${ev}
+          agent=${agent}
+          resolved=${ev.call_id ? resolved[ev.call_id] : null}
+          onGrow=${onGrow}
+          onDecide=${(callId, approve) => onDecide && onDecide(agent, callId, approve)} />`)}
+        ${running ? html`<div class="vb-thinking"><span class="vb-spinner"></span> thinking…</div>` : null}`}
   </div>`;
 }
