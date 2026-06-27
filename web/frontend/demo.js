@@ -10,12 +10,12 @@ import { SandboxTree } from "./explorer.js";
 // Display copy for the attack chips, keyed by scenario id (the design specifies
 // exact short labels). Falls back to deriving from the scenario name/tagline.
 const CHIP_META = {
-  "attack-1": { head: "⭐ Attack 1", label: "innocent secret file" },
-  "attack-2": { head: "Attack 2", label: "exfiltrate offsite" },
-  "attack-3": { head: "Attack 3", label: "reveal a secrets file" },
-  "attack-4": { head: "Attack 4", label: "the vault boundary" },
-  "delegation": { head: "Attack 5", label: "scoped delegation" },
-  "wallet":     { head: "Attack 6", label: "wallet enforcement" },
+  "attack-1": { head: "⭐ Attack 1", label: "hidden key in a file" },
+  "attack-2": { head: "Attack 2", label: "email a stolen key offsite" },
+  "attack-3": { head: "Attack 3", label: "print the secrets file" },
+  "attack-4": { head: "Attack 4", label: "ask the agent for .env" },
+  "delegation": { head: "Attack 5", label: "limit a sub-agent" },
+  "wallet":     { head: "Attack 6", label: "cap the spend" },
 };
 
 // Per-scenario "what just happened" summaries (verbatim design copy), shown once
@@ -282,8 +282,8 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
   return html`<section id="demo" class="vb-section">
     <div class="vb-section-head">
       <div class="vb-eyebrow blue">The live demo</div>
-      <h2 class="vb-h2">Same task, same tools. Watch what each one does.</h2>
-      <p class="vb-section-sub">Pick an attack, hit run, and keep your eyes on the two context inspectors.</p>
+      <h2 class="vb-h2">Same task, same tools. Watch which one holds the line.</h2>
+      <p class="vb-section-sub">Hit run, then watch the strip atop each column: it flags the moment a secret is exposed - sitting in the agent's context (the text an AI can read and repeat) or sent out of the sandbox.</p>
     </div>
 
     <!-- controls -->
@@ -326,7 +326,7 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
 
     <!-- columns -->
     <div class="vb-cols">
-      <${DemoColumn} kind="prompt" name="Prompt Agent" caption="the old way · rules in the prompt"
+      <${DemoColumn} kind="prompt" name="Prompt Agent" caption="baseline · guardrails are only prompt text"
         events=${feeds.prompt} running=${running.prompt} scan=${scans.prompt} resetKey=${runSeq} onDecide=${onDecide} />
       <${DemoColumn} kind="breaker" name="Breaker Agent" caption="the new way · access at runtime"
         events=${feeds.breaker} running=${running.breaker} scan=${scans.breaker} resetKey=${runSeq} onDecide=${onDecide}
@@ -350,6 +350,7 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
               <div><div class="vb-what-label breaker">Breaker Agent</div><div class="vb-what-text">${summary.breaker}</div></div>
             </div>
           </div>
+          <div class="vb-what-cta">Convinced? <a href="https://github.com/PythonCoder1000/AgentBreaker">⭐ Star it on GitHub</a> · <a href="#how">See the machinery →</a> · <a href="#run">Run it yourself ↓</a></div>
         </div>`
       : null}
 

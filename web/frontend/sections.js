@@ -16,6 +16,7 @@ export function Nav() {
         <a class="vb-nav-link" href="#demo">Live demo</a>
         <a class="vb-nav-link" href="#how">How it works</a>
         <a class="vb-nav-link" href="#different">Why different</a>
+        <a class="vb-nav-link" href="https://github.com/PythonCoder1000/AgentBreaker">GitHub ↗</a>
       </div>
       <a class="vb-cta" href="#demo">▶ Open the demo</a>
     </div>
@@ -30,21 +31,22 @@ export function Hero() {
   </div>`;
   const arrow = () => html`<div class="vb-flow-arrow">→</div>`;
   return html`<section class="vb-section narrow-hero vb-hero">
-    <div class="vb-pill"><span class="vb-pill-dot"></span> Live security demo · two agents, one task</div>
-    <h1 class="vb-h1">Agents shouldn't<br />hold the keys.</h1>
-    <p class="vb-lead">Issue access at runtime, scoped to the task, so the secret <em>never touches the model.</em> Even a hijacked agent has nothing to steal.</p>
+    <div class="vb-pill"><span class="vb-pill-dot"></span> Live demo · the same attack hits two AI agents, side by side</div>
+    <h1 class="vb-h1">Stop a hijacked AI agent<br />from leaking your API keys.</h1>
+    <p class="vb-lead">Prompt injection - a hidden instruction in a doc, email, or web page - can hijack an AI agent and walk off with your API keys. Guardrails written into the prompt don't stop it; <em>an enforced runtime access layer does.</em> A broker holds the key and makes the call for the agent, so even a fully hijacked agent has nothing to steal.</p>
     <div class="vb-hero-ctas">
-      <a class="vb-cta-lg" href="#demo">▶ Open the live demo</a>
-      <a class="vb-cta-ghost" href="#beats">Watch the 60-sec version</a>
+      <a class="vb-cta-lg" href="#demo">▶ Watch it block the attack</a>
+      <a class="vb-cta-ghost" href="#how">See how it works</a>
     </div>
+    <div class="vb-scoreboard">6 attacks, one AI agent · prompt-only guardrails buckle; the enforced access layer holds the line.</div>
     <div class="vb-flow">
-      ${node("🎫", "Scoped token", "grants access for this task only")}
+      ${node("🎫", "Ask for access", "a scoped pass, this task only")}
       ${arrow()}
-      ${node("🛡️", "Access layer", "injects the key at runtime")}
+      ${node("🛡️", "Broker holds the key", "it makes the call for the agent")}
       ${arrow()}
-      ${node("📦", "Result only", "the answer comes back, not the key")}
+      ${node("📦", "Only the answer returns", "the result comes back, never the key")}
       ${arrow()}
-      ${node("🔒", "Clean context", "no secret ever in the model", true)}
+      ${node("🔒", "Agent stays key-free", "the AI never sees the credential", true)}
     </div>
   </section>`;
 }
@@ -59,7 +61,7 @@ export function Beats() {
   return html`<section id="beats" class="vb-section">
     <div class="vb-section-head">
       <div class="vb-eyebrow">The idea in three beats</div>
-      <h2 class="vb-h2">Problem → approach → payoff</h2>
+      <h2 class="vb-h2">Why prompt-only guardrails fail - and what replaces them.</h2>
     </div>
     <div class="vb-beats">
       ${beat("problem", "⚠️", "Problem", "The key is sitting in the prompt.", "A long-lived credential written into a prompt or a file is one bad instruction away from being stolen.")}
@@ -226,7 +228,7 @@ export function WhyDifferent() {
     </div>
     <div class="vb-trio">
       <div class="vb-trio-card"><div class="vb-trio-kicker">AGENCY</div><p>Scoped, revocable tokens decide what an agent, or its sub-agents, may even attempt.</p></div>
-      <div class="vb-trio-card"><div class="vb-trio-kicker">ACCESS</div><p>The broker leases credentials at runtime, so the secret never enters the model's context.</p></div>
+      <div class="vb-trio-card"><div class="vb-trio-kicker">ACCESS</div><p>A broker (a server-side key vault) leases the credential only at the moment of the call, so it never enters the agent's context - the text the AI can read and repeat.</p></div>
       <div class="vb-trio-card"><div class="vb-trio-kicker">ACCOUNTABILITY</div><p>A tamper-evident chain records who reached what, by reference and fingerprint, never by value.</p></div>
     </div>
   </section>`;
@@ -246,10 +248,12 @@ export function Footer() {
           <li>The interceptor fails open by default; deterministic hard blocks still apply.</li>
         </ul>
       </div>
-      <div class="vb-honesty-card dark">
+      <div class="vb-honesty-card dark" id="run">
         <div class="vb-honesty-head"><span>▶</span><h3>Run it yourself</h3></div>
+        <div class="vb-cli"><span class="vb-prompt">$</span> git clone https://github.com/PythonCoder1000/AgentBreaker && cd AgentBreaker</div>
+        <div class="vb-cli"><span class="vb-prompt">$</span> uv sync --extra web</div>
         <div class="vb-cli"><span class="vb-prompt">$</span> uv run python web/serve.py</div>
-        <p class="vb-runit-note">Python 3.11+ · FastAPI + SSE · no-build React frontend · Claude Sonnet drives both the agent loop and the policy evaluator.</p>
+        <p class="vb-runit-note">Python 3.11+ · FastAPI + SSE · no-build React frontend · Claude Sonnet drives both the agent loop and the policy evaluator. Set ANTHROPIC_API_KEY in .env first.</p>
       </div>
     </div>
     <div class="vb-footer">
@@ -257,11 +261,11 @@ export function Footer() {
       <span class="vb-footer-sep">·</span>
       <span class="vb-footer-tag">An agent should never hold the keys.</span>
       <div class="vb-footer-links">
-        <a href="#">GitHub ↗</a>
+        <a href="https://github.com/PythonCoder1000/AgentBreaker">GitHub ↗</a>
         <a href="#demo">Live demo ↗</a>
-        <a href="#">60-sec video ↗</a>
+        <a href="#how">How it works ↗</a>
       </div>
     </div>
-    <div class="vb-footer-note">Authorized testing only · everything acted on is synthetic</div>
+    <div class="vb-footer-note">Built at AGI House Agent Identity Build Day · Authorized testing only - everything acted on is synthetic</div>
   </section>`;
 }
