@@ -12,7 +12,7 @@
 
 services:
   - type: web
-    name: agentbreaker
+    name: brokerai
     runtime: python
     plan: free
     # uv respects pyproject's package=false and the committed uv.lock for a
