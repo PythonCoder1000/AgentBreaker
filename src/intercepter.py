@@ -34,6 +34,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import anthropic
 from rich import box
@@ -45,7 +46,9 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
+import audit
 from context import AGENT_ROOT, attachments, command_paths, gather_file_context, workspace_tree
+from identity import CapabilityToken, is_token_revoked
 from settings import (
     ATTACHMENT_BLOCKED_BASENAMES,
     ATTACHMENT_BLOCKED_COMPONENTS,
@@ -64,6 +67,7 @@ from settings import (
     BASH_BLOCK_PATTERNS,
     BASH_ESCALATE_PATTERNS,
     BASH_PATH_BLOCK_PATTERNS,
+    BROKER_AUTHORIZED_REASON,
     COLOR_ALLOW,
     COLOR_BLOCK,
     COLOR_DIM,
@@ -125,6 +129,93 @@ class InterceptContext:
     # evaluator so it judges a tool call against the whole conversation, not just
     # the latest message (a benign-looking command can be set up by a prior turn).
     prior_tasks: list[str] = field(default_factory=list)
+    # Capability token for this session. When set, tier 0 validates revocation,
+    # expiry, and scope before any other policy tier runs.
+    token: Optional[CapabilityToken] = None
+    # Session ID for the audit log. Empty string means "don't audit" (CLI without
+    # an explicit session, or Prompt Agent).
+    session_id: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Token validation (Tier 0) and audit helpers
+# --------------------------------------------------------------------------- #
+def _token_block(token: CapabilityToken, tool_name: str, tool_input: dict) -> str | None:
+    """Check the capability token before any other policy tier.
+
+    Returns a block reason string on failure, None on pass. Order matters:
+    revocation/expiry are checked before scope so a revoked token is always
+    rejected even if the scope would otherwise allow the call.
+    """
+    if not token.verify():
+        return "invalid capability token signature — possible replay or tampering"
+    if token.is_expired():
+        return "capability token has expired"
+    if is_token_revoked(token):
+        return "capability token has been revoked"
+    if tool_name not in token.scope.tools:
+        return f"tool '{tool_name}' is outside this agent's granted capability scope"
+    if tool_name == "run_bash" and not token.scope.bash_allowed:
+        return "run_bash is disabled in this agent's capability scope"
+    if tool_name == "spawn_subagent" and token.scope.max_depth <= 0:
+        return "spawn_subagent blocked: this token's scope does not permit spawning sub-agents"
+    if tool_name == "call_api" and token.scope.services is not None:
+        service = str(tool_input.get("service", ""))
+        if service not in token.scope.services:
+            return f"service '{service}' is outside this token's allowed services scope"
+    if tool_name == "send_email" and token.scope.email_to is not None:
+        recipients = _recipients(tool_input.get("email", ""))
+        allowed = set(token.scope.email_to)
+        for addr in recipients:
+            if addr not in allowed:
+                return f"recipient '{addr}' is not in this token's allowed email list"
+    if tool_name == "run_bash" and token.scope.allowed_paths is not None:
+        cmd = str(tool_input.get("command", ""))
+        paths = command_paths(cmd)
+        allowed_prefixes = token.scope.allowed_paths
+        for path in paths:
+            if not any(path.startswith(prefix) for prefix in allowed_prefixes):
+                return f"command targets path outside token's allowed_paths scope: {path}"
+    return None
+
+
+def _input_summary(tool_name: str, tool_input: dict) -> str:
+    """One-line summary of a tool call for the audit record."""
+    if tool_name == "send_email":
+        return f"to={tool_input.get('email', '')} body={str(tool_input.get('message', ''))[:80]}"
+    if tool_name == "run_bash":
+        return str(tool_input.get("command", ""))
+    if tool_name == "spawn_subagent":
+        return str(tool_input.get("task", ""))[:120]
+    if tool_name == "call_api":
+        return f"service={tool_input.get('service', '')} action={tool_input.get('action', '')}"
+    return str(tool_input)[:120]
+
+
+def _audit(
+    context: InterceptContext,
+    tool_name: str,
+    tool_input: dict,
+    decision: str,
+    reason: str,
+    tier: str,
+    file_context: list[tuple[str, str]],
+) -> None:
+    """Write one audit record (no-op if session_id is empty)."""
+    if not context.session_id:
+        return
+    audit.log_event(
+        session_id=context.session_id,
+        token_id=context.token.token_id[:8] if context.token else None,
+        agent_name=context.token.agent_name if context.token else "breaker",
+        tool_name=tool_name,
+        input_summary=_input_summary(tool_name, tool_input),
+        tier=tier,
+        decision=decision,
+        reason=reason or "",
+        task=context.task,
+        files_read=[p for p, _ in file_context],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -169,19 +260,39 @@ def decide(
     policy core — the terminal `evaluate` renders the result as panels, the web demo
     renders it as events; neither duplicates the tier ordering.
     """
+    # 0. Token validation — revocation, expiry, and scope (before any disk I/O).
+    if context.token is not None:
+        reason = _token_block(context.token, tool_name, tool_input)
+        if reason:
+            _audit(context, tool_name, tool_input, "block", reason, "token", [])
+            return "block", reason, [], "token"
+
+    # 0b. Brokered access (call_api): the capability token IS the authorization.
+    #     There is no untrusted file or content to semantically judge — the secret
+    #     is leased and used entirely inside the broker and never enters the model
+    #     — so once tier-0 scope passes, allow without an AI call.
+    if tool_name == "call_api":
+        _audit(context, tool_name, tool_input, "allow", BROKER_AUTHORIZED_REASON, "token", [])
+        return "allow", BROKER_AUTHORIZED_REASON, [], "token"
+
     # 1. Hard-logic blocks (instant; no disk I/O).
     reason = _hard_block(tool_name, tool_input)
     if reason:
+        _audit(context, tool_name, tool_input, "block", reason, "hard_block", [])
         return "block", reason, [], "hard_block"
 
     # 2. Hard-logic escalations (instant; ask the operator).
     reason = _hard_escalation(tool_name, tool_input)
-    if reason and not ask(tool_name, tool_input, reason):
-        return "block", f"{INTERCEPT_DENIED_REASON} ({reason})", [], "hard_escalation"
+    if reason:
+        if not ask(tool_name, tool_input, reason):
+            denied = f"{INTERCEPT_DENIED_REASON} ({reason})"
+            _audit(context, tool_name, tool_input, "block", denied, "hard_escalation", [])
+            return "block", denied, [], "hard_escalation"
 
     # 2b. Fast-path: a pure read-only listing/search (ls, find, ...) is auto-allowed
     #     without an AI call — it can't read file contents, mutate, chain, or exec.
     if tool_name == "run_bash" and _bash_auto_allow(str(tool_input.get("command", ""))):
+        _audit(context, tool_name, tool_input, "allow", BASH_AUTO_ALLOW_REASON, "auto", [])
         return "allow", BASH_AUTO_ALLOW_REASON, [], "auto"
 
     # 3. Load the involved files (only now the deterministic tiers have cleared),
@@ -189,10 +300,15 @@ def decide(
     file_context = gather_file_context(tool_name, tool_input)
     ai_decision, ai_reason = _ai_evaluate(client, console, context, tool_name, tool_input, file_context)
     if ai_decision == "block":
+        _audit(context, tool_name, tool_input, "block", ai_reason or "failed AI policy review", "ai", file_context)
         return "block", ai_reason or "failed AI policy review", [], "ai"
-    if ai_decision == "escalate" and not ask(tool_name, tool_input, ai_reason or "flagged by AI policy"):
-        return "block", f"{INTERCEPT_DENIED_REASON} ({ai_reason})", [], "ai"
+    if ai_decision == "escalate":
+        if not ask(tool_name, tool_input, ai_reason or "flagged by AI policy"):
+            denied = f"{INTERCEPT_DENIED_REASON} ({ai_reason})"
+            _audit(context, tool_name, tool_input, "block", denied, "ai", file_context)
+            return "block", denied, [], "ai"
 
+    _audit(context, tool_name, tool_input, "allow", ai_reason, "ai", file_context)
     return "allow", ai_reason, file_context, "ai"
 
 

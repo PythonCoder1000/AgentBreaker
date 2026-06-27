@@ -34,13 +34,17 @@ import anthropic  # noqa: E402
 
 from config import (  # noqa: E402
     ATTACHMENT_SCAN_MAX_BYTES,
+    DEFAULT_EMAIL_REPLY,
     EMAIL_BODY_PREVIEW_CHARS,
     EVENT_OUTPUT_MAX_CHARS,
     SECRET_CONTENT_PATTERNS,
     SECRET_PATH_PATTERNS,
 )
+import broker  # noqa: E402
+import inspector  # noqa: E402
 from context import format_for_agent, workspace_tree  # noqa: E402
-from intercepter import decide  # noqa: E402
+from identity import Scope, derive_token, tools_for_scope  # noqa: E402
+from intercepter import InterceptContext, decide  # noqa: E402
 from settings import (  # noqa: E402
     AGENT_NO_CONTENT_NOTICE,
     AGENT_RULES,
@@ -58,6 +62,7 @@ from settings import (  # noqa: E402
     EMAIL_FENCE_NONCE_BYTES,
     EMAIL_NO_REPLY_TEMPLATE,
     EMAIL_REPLY_TEMPLATE,
+    IDENTITY_TOKEN_TTL_SECONDS,
     INTERCEPT_BLOCK_TEMPLATE,
     MAX_AGENT_STEPS,
     MAX_TOKENS,
@@ -171,6 +176,15 @@ def _display_params(tool_name: str, tool_input: dict) -> dict:
         return {"command": _safe(tool_input.get("command", ""))}
     if tool_name == "web_search":
         return {"query": _safe(tool_input.get("query", ""))}
+    if tool_name == "call_api":
+        params = {
+            "service": _safe(tool_input.get("service", "")),
+            "action": _safe(tool_input.get("action", "")),
+        }
+        raw = tool_input.get("payload")
+        if isinstance(raw, dict) and raw:
+            params["payload"] = _safe(raw)
+        return params
     return {key: _safe(value) for key, value in tool_input.items()}
 
 
@@ -221,12 +235,136 @@ def _looks_dangerous(tool_name: str, tool_input: dict) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Sub-agent support
+# --------------------------------------------------------------------------- #
+class _SubAgentEmitter:
+    """Wraps a parent run so a child agent loop emits depth-tagged events."""
+
+    def __init__(self, parent_run, task: str, depth: int, token, intercept_ctx) -> None:
+        self.task = task
+        self.depth = depth
+        self._parent = parent_run
+        self.client = parent_run.client
+        self.null_console = parent_run.null_console
+        self.stop = parent_run.stop  # inherit parent's stop signal
+        self.intercept_ctx = intercept_ctx
+        self.system = build_system_prompt(include_rules=False)
+        self.session = parent_run.session
+        self.agent = parent_run.agent
+        self.history: list = []
+        self.messages: list = []
+        self.token = token
+
+    def emit(self, event_type: str, **fields) -> None:
+        self._parent.emit(event_type, subagent_depth=self.depth, **fields)
+
+    def next_reply(self) -> str:
+        return DEFAULT_EMAIL_REPLY
+
+    def ask(self, call_id: str, tool: str, tool_input: dict, reason: str) -> bool:
+        return self._parent.ask(call_id, tool, tool_input, reason)
+
+
+def _handle_spawn_subagent(run, tool_input: dict) -> str:
+    """Derive a child token, run a nested agent loop, return its response."""
+    task = str(tool_input.get("task", ""))
+    # The model can violate the tool's input_schema, so coerce a non-dict scope /
+    # non-list fields to safe shapes — a raised exception here would leave a
+    # dangling tool_use and break the conversation.
+    scope_input = tool_input.get("scope")
+    if not isinstance(scope_input, dict):
+        scope_input = {}
+    depth = getattr(run, "depth", 0)
+
+    parent_token = getattr(run, "token", None)
+    if parent_token is not None:
+        if parent_token.scope.max_depth <= 0:
+            return "[SYSTEM] spawn_subagent blocked: this token does not permit spawning sub-agents (max_depth=0)."
+        req_tools = scope_input.get("tools")
+        if not isinstance(req_tools, list):
+            req_tools = list(parent_token.scope.tools)
+        req_email = scope_input.get("email_to")
+        if req_email is not None and not isinstance(req_email, list):
+            req_email = None
+        requested = Scope(
+            tools=req_tools,
+            bash_allowed=bool(scope_input.get("bash_allowed", parent_token.scope.bash_allowed)),
+            email_to=req_email,
+            max_depth=parent_token.scope.max_depth - 1,
+        )
+        child_token = derive_token(
+            parent_token,
+            f"SubAgent-d{depth + 1}",
+            requested,
+            ttl_seconds=IDENTITY_TOKEN_TTL_SECONDS,
+        )
+        child_ctx = InterceptContext(token=child_token, session_id=run.session)
+    else:
+        child_token = None
+        child_ctx = None
+
+    run.emit("subagent_start", depth=depth + 1, task=task[:200],
+              token=child_token.to_display() if child_token else None)
+    sub = _SubAgentEmitter(run, task, depth + 1, child_token, child_ctx)
+    run_agent(sub)
+
+    for msg in reversed(sub.messages):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str) and content:
+            result = f"[SYSTEM] Sub-agent completed.\n\nSub-agent response:\n{content}"
+            run.emit("subagent_end", depth=depth + 1, result=result[:400])
+            return result
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    parts.append(b["text"])
+                elif hasattr(b, "type") and b.type == "text":
+                    parts.append(b.text)
+            if parts:
+                result = f"[SYSTEM] Sub-agent completed.\n\nSub-agent response:\n{''.join(parts)}"
+                run.emit("subagent_end", depth=depth + 1, result=result[:400])
+                return result
+
+    run.emit("subagent_end", depth=depth + 1, result="")
+    return "[SYSTEM] Sub-agent completed with no text response."
+
+
+# --------------------------------------------------------------------------- #
+# Brokered access (call_api)
+# --------------------------------------------------------------------------- #
+def _handle_call_api(run, tool_input: dict) -> str:
+    """Make a brokered service call: the broker leases the credential at runtime,
+    authenticates the call, and returns only the result. The secret never enters
+    the model's context (and so never reaches this return value)."""
+    service = str(tool_input.get("service", ""))
+    action = str(tool_input.get("action", ""))
+    raw_payload = tool_input.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else None
+
+    token = getattr(run, "token", None)
+    session_id = run.session if token is not None else ""
+    agent_name = token.agent_name if token is not None else "agent"
+    return broker.call(
+        service, action, payload,
+        token=token, session_id=session_id, agent_name=agent_name, task=run.task,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Agent loop
 # --------------------------------------------------------------------------- #
 def run_agent(run) -> None:
     """Drive one turn for one agent, continuing the session history, emitting events."""
     task = run.task
     run.emit("user_message", text=task)
+
+    # Emit the identity token for root sessions (sub-agents emit via subagent_start).
+    if getattr(run, "depth", 0) == 0 and getattr(run, "token", None) is not None:
+        run.emit("identity_issued", token=run.token.to_display())
+
     messages: list = list(run.history) + [{"role": "user", "content": task}]
     run.messages = messages  # same object the loop appends to; persisted on completion
     if run.intercept_ctx is not None:
@@ -265,16 +403,29 @@ def run_agent(run) -> None:
     if messages and messages[-1].get("role") == "user":
         messages.append({"role": "assistant", "content": AGENT_NO_CONTENT_NOTICE})
 
+    # Context inspector: prove (per root turn) whether any credential ended up in
+    # the model's context. Sub-agents (depth > 0) don't emit — their content is
+    # already covered by the root's spawn_subagent tool result.
+    if getattr(run, "depth", 0) == 0:
+        report = inspector.scan_messages(messages, broker.live_secret_values())
+        run.emit("context_scan", clean=report["clean"], count=report["count"],
+                 findings=report["findings"])
+
 
 def _stream_once(run, messages: list[dict]):
     """Stream one model segment; emit web_search activity and the answer text."""
     text_parts: list[str] = []
+    active_tools = (
+        tools_for_scope(TOOLS, run.token.scope)
+        if getattr(run, "token", None) is not None
+        else TOOLS
+    )
     try:
         with run.client.messages.stream(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=run.system,
-            tools=TOOLS,
+            tools=active_tools,
             messages=messages,
         ) as stream:
             for event in stream:
@@ -332,6 +483,10 @@ def _handle_tool(run, block) -> dict:
         result = _run_bash(str(tool_input.get("command", "")))
     elif name == "send_email":
         result = _send_email(run, tool_input)
+    elif name == "call_api":
+        result = _handle_call_api(run, tool_input)
+    elif name == "spawn_subagent":
+        result = _handle_spawn_subagent(run, tool_input)
     else:
         result = f"Error: unknown tool '{name}'."
 
