@@ -271,6 +271,19 @@ em { font-style: normal; color: var(--t-hi3); }
 .vb-audit-msg.bad { color: var(--red); }
 .vb-revoked-note { margin-top: 9px; font-size: 11.5px; color: var(--red); }
 
+/* agent delegation tree (breaker column, delegation scenario) */
+.vb-agent-tree { padding: 11px 16px 13px; border-bottom: 1px solid var(--b4); background: rgba(56, 189, 248, .03); animation: vb-rise .25s ease; }
+.vb-tree-header { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; font-weight: 700; color: var(--blue); margin-bottom: 9px; }
+.vb-tree-node { margin-bottom: 5px; }
+.vb-tree-row { display: flex; align-items: flex-start; gap: 7px; }
+.vb-tree-glyph { font-family: var(--mono); color: var(--blue); font-size: 11px; margin-top: 2px; flex-shrink: 0; opacity: .8; }
+.vb-tree-card { flex: 1; min-width: 0; }
+.vb-tree-name { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: var(--t-hi3); margin-bottom: 2px; flex-wrap: wrap; }
+.vb-tree-tid { font-family: var(--mono); font-size: 10px; color: var(--t-muted2); }
+.vb-tree-badge { font-size: 9px; font-family: var(--mono); letter-spacing: .5px; text-transform: uppercase; color: var(--amber); border: 1px solid rgba(251, 191, 36, .35); border-radius: 4px; padding: 1px 5px; }
+.vb-tree-tools { font-family: var(--mono); font-size: 10.5px; color: var(--green); margin-bottom: 2px; }
+.vb-tree-stripped { font-family: var(--mono); font-size: 10.5px; color: var(--amber); opacity: .75; }
+
 /* event feed */
 .vb-feed { flex: 1; min-height: 360px; max-height: 540px; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .vb-col.breaker .vb-feed { min-height: 300px; max-height: 480px; }

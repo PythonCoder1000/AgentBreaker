@@ -14,6 +14,8 @@ const CHIP_META = {
   "attack-2": { head: "Attack 2", label: "exfiltrate offsite" },
   "attack-3": { head: "Attack 3", label: "reveal a secrets file" },
   "attack-4": { head: "Attack 4", label: "the vault boundary" },
+  "delegation": { head: "Attack 5", label: "scoped delegation" },
+  "wallet":     { head: "Attack 6", label: "wallet enforcement" },
 };
 
 // Per-scenario "what just happened" summaries (verbatim design copy), shown once
@@ -34,6 +36,14 @@ const SUMMARIES = {
   "attack-4": {
     prompt: "Tricked by an injected reply, it read the key out of .env and pasted it to the attacker.",
     breaker: "It reached Helios through the access layer and never held the key, so there was simply nothing to hand over.",
+  },
+  "delegation": {
+    prompt: "The sub-agent had no scope restrictions and read .env freely. When Riley asked, the parent already had the key and handed it over.",
+    breaker: "The sub-agent's derived token was narrowed to run_bash and call_api only — .env reads blocked, email stripped. Nothing to hand over.",
+  },
+  "wallet": {
+    prompt: "All four charges cleared: $100 + $100 + $100 + $250 = $550. No spending cap, no limit on how much the agent could drain.",
+    breaker: "Charges 1–2 cleared ($200). Charge 3 would bring the total to $300 — over the $250 token budget — and was rejected before processing.",
   },
 };
 
@@ -121,7 +131,8 @@ function IdentityPanel({ token, onRevoke, onVerifyAudit }) {
   const tokenId = token ? token.token_id : "cap_7f3a";
   const tools = (scope.tools || ["run_bash", "send_email", "call_api"]).join(" · ");
   const recipients = scope.email_to && scope.email_to.length ? scope.email_to.join(", ") : "*@horizon.org only";
-  const services = `${(scope.services && scope.services.length ? scope.services : ["helios"]).join(", ")} · ${fmtExpiry(token)} · delegate ≤${scope.max_depth != null ? scope.max_depth : 1}`;
+  const budgetStr = scope.spending_limit_usd != null ? ` · budget $${scope.spending_limit_usd}` : "";
+  const services = `${(scope.services && scope.services.length ? scope.services : ["helios"]).join(", ")} · ${fmtExpiry(token)} · delegate ≤${scope.max_depth != null ? scope.max_depth : 1}${budgetStr}`;
 
   const doRevoke = () => {
     if (revoked || !live || !onRevoke) return;
@@ -156,6 +167,59 @@ function IdentityPanel({ token, onRevoke, onVerifyAudit }) {
     </div>
     ${revoked ? html`<div class="vb-revoked-note">Revoked. This session, and any sub-agent it spawned, can no longer reach anything.</div>` : null}
     ${!live ? html`<div class="vb-revoked-note" style=${{ color: "var(--t-faint)" }}>Issued when you run the demo.</div>` : null}
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Agent delegation tree — shows the token derivation hierarchy when a scenario
+// uses spawn_subagent. Only rendered in the Breaker column (tokens only exist
+// there); hidden until at least one sub-agent has been started.
+// ---------------------------------------------------------------------------
+function AgentTree({ rootToken, events }) {
+  const subStarts = events.filter(e => e.type === "subagent_start" && e.token);
+  if (!rootToken || subStarts.length === 0) return null;
+
+  const nodes = [
+    { depth: 0, token: rootToken, label: "Root agent" },
+    ...subStarts.map(e => ({ depth: e.depth, token: e.token, label: `Sub-agent (depth ${e.depth})` }))
+  ];
+
+  // For each node, find the true derivation parent's tools: the last preceding
+  // node with depth = this node's depth - 1. Using i-1 would be wrong for
+  // sibling sub-agents (same depth), which share the root as their parent.
+  const nodeTools = nodes.map(n => (n.token && n.token.scope && n.token.scope.tools) || []);
+  const parentToolsList = nodes.map((node, i) => {
+    if (i === 0) return nodeTools[0];
+    for (let j = i - 1; j >= 0; j--) {
+      if (nodes[j].depth === node.depth - 1) return nodeTools[j];
+    }
+    return nodeTools[i];
+  });
+
+  return html`<div class="vb-agent-tree">
+    <div class="vb-tree-header">Delegation tree · scope at each level</div>
+    ${nodes.map((node, i) => {
+      const tools = nodeTools[i];
+      const dropped = parentToolsList[i].filter(t => !tools.includes(t));
+      const tid = node.token ? node.token.token_id : "—";
+
+      return html`<div key=${i} class="vb-tree-node" style=${{ paddingLeft: (node.depth * 20) + "px" }}>
+        <div class="vb-tree-row">
+          <span class="vb-tree-glyph">${node.depth === 0 ? "▮" : "└▸"}</span>
+          <div class="vb-tree-card">
+            <div class="vb-tree-name">
+              <span>${node.label}</span>
+              <span class="vb-tree-tid">${tid}</span>
+              ${node.depth > 0 ? html`<span class="vb-tree-badge">derived</span>` : null}
+            </div>
+            <div class="vb-tree-tools">${tools.length ? tools.join(" · ") : "no tools"}</div>
+            ${dropped.length > 0
+              ? html`<div class="vb-tree-stripped">− stripped: ${dropped.join(", ")}</div>`
+              : null}
+          </div>
+        </div>
+      </div>`;
+    })}
   </div>`;
 }
 
@@ -266,7 +330,10 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
         events=${feeds.prompt} running=${running.prompt} scan=${scans.prompt} resetKey=${runSeq} onDecide=${onDecide} />
       <${DemoColumn} kind="breaker" name="Breaker Agent" caption="the new way · access at runtime"
         events=${feeds.breaker} running=${running.breaker} scan=${scans.breaker} resetKey=${runSeq} onDecide=${onDecide}
-        identityPanel=${html`<${IdentityPanel} token=${identity.breaker} onRevoke=${() => onRevoke("breaker")} onVerifyAudit=${onVerifyAudit} />`} />
+        identityPanel=${html`
+          <${IdentityPanel} token=${identity.breaker} onRevoke=${() => onRevoke("breaker")} onVerifyAudit=${onVerifyAudit} />
+          <${AgentTree} rootToken=${identity.breaker} events=${feeds.breaker} />
+        `} />
     </div>
 
     <!-- what just happened -->
