@@ -18,6 +18,7 @@ import base64
 import io
 import json
 import os
+import re as _re
 import secrets
 import sys
 import threading
@@ -26,6 +27,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
+
+# Session IDs flow into file paths (audit log) and dict keys — restrict to
+# safe characters so a crafted value can't cause path traversal.
+_SESSION_RE = _re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+
+def _validate_session(session: str) -> None:
+    if not _SESSION_RE.match(session):
+        raise HTTPException(status_code=400, detail="invalid session id")
+
+
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
@@ -49,9 +61,18 @@ import engine  # noqa: E402
 import scenarios  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+import audit as audit_module  # noqa: E402
 import reset_env  # noqa: E402
+from identity import Scope, generate_token, revoke_token  # noqa: E402
 from intercepter import InterceptContext  # noqa: E402
-from settings import TESTING_ENV_DIRNAME  # noqa: E402
+from settings import (  # noqa: E402
+    AGENT_NAME,
+    DEFAULT_SCOPE_TOOLS,
+    IDENTITY_TOKEN_TTL_SECONDS,
+    PRINCIPAL_NAME,
+    SUBAGENT_MAX_DEPTH,
+    TESTING_ENV_DIRNAME,
+)
 
 load_dotenv()
 
@@ -63,6 +84,10 @@ RUNS: dict[tuple[str, str], "Run"] = {}
 # Persisted conversation history per (session_id, agent), so a session is a real
 # multi-turn chat: each new message continues from the stored messages.
 HISTORY: dict[tuple[str, str], list] = {}
+# Sessions where the operator has revoked the capability token. Checked before
+# each new Run so revocation survives turn boundaries (new turns would otherwise
+# re-issue a fresh root token that is not in _REVOKED).
+REVOKED_SESSIONS: set[tuple[str, str]] = set()
 
 
 class Run:
@@ -80,7 +105,23 @@ class Run:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.client = engine.anthropic.Anthropic(api_key=api_key)
         self.system = engine.build_system_prompt(include_rules=(agent == "prompt"))
-        self.intercept_ctx = InterceptContext() if agent == "breaker" else None
+        # Issue a capability token for the Breaker Agent and wire it into the
+        # intercept context so tier 0 validates identity before any policy runs.
+        if agent == "breaker":
+            self.token = generate_token(
+                agent_name=AGENT_NAME,
+                principal=PRINCIPAL_NAME,
+                scope=Scope(
+                    tools=DEFAULT_SCOPE_TOOLS,
+                    bash_allowed=True,
+                    max_depth=SUBAGENT_MAX_DEPTH,
+                ),
+                ttl_seconds=IDENTITY_TOKEN_TTL_SECONDS,
+            )
+            self.intercept_ctx = InterceptContext(token=self.token, session_id=session)
+        else:
+            self.token = None
+            self.intercept_ctx = None
         # A throwaway console so the policy core's spinner/Live has somewhere to go.
         self.null_console = Console(file=io.StringIO(), force_terminal=False)
         self._replies = list(email_replies)
@@ -281,8 +322,11 @@ async def read_file(path: str) -> dict:
 
 @app.get("/api/stream")
 async def stream(agent: str, session: str, scenario: str | None = None, message: str | None = None):
+    _validate_session(session)
     if agent not in ("prompt", "breaker"):
         raise HTTPException(status_code=400, detail="agent must be 'prompt' or 'breaker'")
+    if (session, agent) in REVOKED_SESSIONS:
+        raise HTTPException(status_code=403, detail="session token has been revoked")
     if message and message.strip():     # a free-text chat message wins over a preset
         task, replies = message, []
     elif scenario:
@@ -340,6 +384,7 @@ async def reset_session(req: ResetRequest) -> dict:
         if run is not None:
             run.cancel()
         HISTORY.pop(key, None)
+        REVOKED_SESSIONS.discard(key)
     return {"ok": True}
 
 
@@ -350,6 +395,52 @@ async def decision(payload: Decision) -> dict:
         raise HTTPException(status_code=404, detail="no active run for that session/agent")
     run.resolve(payload.call_id, payload.approve)
     return {"ok": True}
+
+
+class RevokeRequest(BaseModel):
+    session: str
+    agent: str
+
+
+@app.post("/api/revoke")
+async def revoke_agent(req: RevokeRequest) -> dict:
+    """Revoke the active capability token for an agent session.
+
+    All subsequent tool calls from this session (and any sub-agents it has
+    spawned) are blocked at tier 0 of the interceptor, even if a new turn is
+    started. The SSE stream receives an identity_revoked event.
+    """
+    _validate_session(req.session)
+    run = RUNS.get((req.session, req.agent))
+    token = getattr(run, "token", None) if run is not None else None
+    if token is None:
+        raise HTTPException(status_code=404, detail="no active token for that session/agent")
+    revoke_token(token.token_id)
+    # Block future turns for this session — each turn issues a fresh root token,
+    # so revoking the token id alone wouldn't stop a new turn from re-arming.
+    REVOKED_SESSIONS.add((req.session, req.agent))
+    if run is not None:
+        run.emit("identity_revoked", token_id=token.token_id[:8])
+    return {"ok": True, "revoked_token": token.token_id[:8]}
+
+
+@app.get("/api/audit/{session}")
+async def get_audit_log(session: str) -> list[dict]:
+    """Return the structured audit log for a session (all tool call decisions)."""
+    _validate_session(session)
+    return audit_module.read_log(session)
+
+
+@app.get("/api/audit/{session}/verify")
+async def verify_audit_log(session: str) -> dict:
+    """Verify the session's hash-linked audit chain (tamper-evidence check).
+
+    Returns {"ok", "length", "broken_at", "reason"}: ok is True only if every
+    record's content hash matches and links to its predecessor — so a tampered,
+    reordered, or dropped record is provably detected.
+    """
+    _validate_session(session)
+    return audit_module.verify_chain(session)
 
 
 class SPAStaticFiles(StaticFiles):
