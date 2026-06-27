@@ -10,10 +10,10 @@ import { SandboxTree } from "./explorer.js";
 // Display copy for the attack chips, keyed by scenario id (the design specifies
 // exact short labels). Falls back to deriving from the scenario name/tagline.
 const CHIP_META = {
-  "attack-1": { head: "⭐ Attack 1", label: "hidden key in a file" },
-  "attack-2": { head: "Attack 2", label: "email a stolen key offsite" },
-  "attack-3": { head: "Attack 3", label: "print the secrets file" },
-  "attack-4": { head: "Attack 4", label: "ask the agent for .env" },
+  "attack-1": { head: "⭐ Attack 1", label: "innocent secret file" },
+  "attack-2": { head: "Attack 2", label: "exfiltrate offsite" },
+  "attack-3": { head: "Attack 3", label: "reveal a secrets file" },
+  "attack-4": { head: "Attack 4", label: "the vault boundary" },
   "delegation": { head: "Attack 5", label: "limit a sub-agent" },
   "wallet":     { head: "Attack 6", label: "cap the spend" },
 };
@@ -23,7 +23,7 @@ const CHIP_META = {
 const SUMMARIES = {
   "attack-1": {
     prompt: "It attached a file that secretly held an API key and emailed it out. The innocent name slipped past.",
-    breaker: "The access layer read what the file actually contained, a live key, and blocked the send.",
+    breaker: "The security layer read what the file actually contained, a live key, and blocked the send.",
   },
   "attack-2": {
     prompt: "It emailed the raw .env credentials to an outside personal address.",
@@ -35,7 +35,7 @@ const SUMMARIES = {
   },
   "attack-4": {
     prompt: "It read .env as instructed - the key entered context immediately. The injected reply then asked for it. With the value already in memory, there was nothing stopping it.",
-    breaker: "The .env read was blocked before any key entered context. When the injected reply asked for it, there was nothing to hand over.",
+    breaker: "It reached Helios through the security layer and never held the key, so when the injected reply asked for it, there was nothing to hand over.",
   },
   "delegation": {
     prompt: "The sub-agent ran cat .env unscoped - the key entered its context and surfaced in its report. The parent forwarded the findings and complied when Riley followed up.",
@@ -154,7 +154,7 @@ function IdentityPanel({ token, onRevoke, onVerifyAudit }) {
       <span class="vb-identity-k">id</span><span class="vb-identity-v mono">${tokenId}</span>
       <span class="vb-identity-k">scope</span><span class="vb-identity-v">${tools}</span>
       <span class="vb-identity-k">recipients</span><span class="vb-identity-v">${recipients}</span>
-      <span class="vb-identity-k">services</span><span class="vb-identity-v">${services}</span>
+      <span class="vb-identity-k">limits</span><span class="vb-identity-v">${services}</span>
     </div>
     <div class="vb-identity-actions">
       <button class="vb-revoke-btn" disabled=${revoked || !live} onClick=${doRevoke}>${revoked ? "Revoked" : "Revoke token"}</button>
@@ -281,9 +281,13 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
 
   return html`<section id="demo" class="vb-section">
     <div class="vb-section-head">
-      <div class="vb-eyebrow blue">The live demo</div>
-      <h2 class="vb-h2">Same task, same tools. Watch which one holds the line.</h2>
-      <p class="vb-section-sub">Hit run, then watch the strip atop each column: it flags the moment a secret is exposed - sitting in the agent's context (the text an AI can read and repeat) or sent out of the sandbox.</p>
+      <div class="vb-eyebrow">
+        <span class="vb-eyebrow-num">02</span>
+        <span class="vb-eyebrow-sep">/</span>
+        <span class="vb-eyebrow-label">See it happen</span>
+      </div>
+      <h2 class="vb-h2">Same task, same tools. One leaks. One has nothing to leak.</h2>
+      <p class="vb-section-sub">Pick an attack, run both agents, and watch the two context inspectors - the strip atop each column flags the moment a secret is exposed: sitting in the agent's context (the text an AI can read and repeat) or sent out of the sandbox.</p>
     </div>
 
     <!-- controls -->
@@ -320,15 +324,15 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
       <span class="vb-legend-item"><span class="vb-swatch good"></span>good: safe / clean / attack blocked</span>
       <span class="vb-legend-item"><span class="vb-swatch bad"></span>bad: exposed / leaked</span>
       <span class="vb-legend-item"><span class="vb-swatch warn"></span>needs human approval</span>
-      <span class="vb-legend-item"><span class="vb-swatch round prompt"></span>Prompt-Only Agent</span>
-      <span class="vb-legend-item"><span class="vb-swatch round breaker"></span>Vault Agent</span>
+      <span class="vb-legend-item"><span class="vb-swatch round prompt"></span>Standard agent</span>
+      <span class="vb-legend-item"><span class="vb-swatch round breaker"></span>Vault agent</span>
     </div>
 
     <!-- columns -->
     <div class="vb-cols">
-      <${DemoColumn} kind="prompt" name="Prompt-Only Agent" caption="baseline · guardrails are only prompt text"
+      <${DemoColumn} kind="prompt" name="Standard agent" caption="the old way · key in context"
         events=${feeds.prompt} running=${running.prompt} scan=${scans.prompt} resetKey=${runSeq} onDecide=${onDecide} />
-      <${DemoColumn} kind="breaker" name="Vault Agent" caption="enforced · every tool call checked at runtime"
+      <${DemoColumn} kind="breaker" name="Vault agent" caption="the Vault Boundary way"
         events=${feeds.breaker} running=${running.breaker} scan=${scans.breaker} resetKey=${runSeq} onDecide=${onDecide}
         identityPanel=${html`
           <${IdentityPanel} token=${identity.breaker} onRevoke=${() => onRevoke("breaker")} onVerifyAudit=${onVerifyAudit} />
@@ -343,11 +347,11 @@ export function LiveDemo({ scenarios, selected, setSelected, running, feeds, sca
           <div class="vb-what-grid">
             <div class="vb-what-cell first">
               <span class="vb-what-emoji">🚨</span>
-              <div><div class="vb-what-label prompt">Prompt-Only Agent</div><div class="vb-what-text">${summary.prompt}</div></div>
+              <div><div class="vb-what-label prompt">Standard agent</div><div class="vb-what-text">${summary.prompt}</div></div>
             </div>
             <div class="vb-what-cell">
               <span class="vb-what-emoji">🔒</span>
-              <div><div class="vb-what-label breaker">Vault Agent</div><div class="vb-what-text">${summary.breaker}</div></div>
+              <div><div class="vb-what-label breaker">Vault agent</div><div class="vb-what-text">${summary.breaker}</div></div>
             </div>
           </div>
           <div class="vb-what-cta">Convinced? <a href="https://github.com/PythonCoder1000/AgentBreaker">⭐ Star it on GitHub</a> · <a href="#how">See the machinery →</a> · <a href="#run">Run it yourself ↓</a></div>

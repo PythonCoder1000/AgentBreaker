@@ -3,7 +3,7 @@
 // static marketing sections (sections.js) around the live demo (demo.js). No build
 // step — htm + React over a CDN.
 import { html, createRoot, useState, useEffect, useRef, useCallback, AGENTS, newId } from "./ui.js";
-import { Nav, Hero, Beats, HowItWorks, WhyDifferent, Footer } from "./sections.js";
+import { Nav, Hero, Beats, HowItWorks, Compare, Transparency, Footer } from "./sections.js";
 import { LiveDemo } from "./demo.js";
 
 function App() {
@@ -144,7 +144,8 @@ function App() {
       running=${running} feeds=${feeds} scans=${scans} identity=${identity} runSeq=${runSeq}
       onRun=${runDemo} onNewChat=${newSession} onDecide=${onDecide} onRevoke=${onRevoke} onVerifyAudit=${onVerifyAudit} />
     <${HowItWorks} />
-    <${WhyDifferent} />
+    <${Compare} />
+    <${Transparency} />
     <${Footer} />
   </div>`;
 }

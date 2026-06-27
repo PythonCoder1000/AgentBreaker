@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vault Boundary - Stop prompt injection from stealing your AI agent's API keys</title>
-    <meta name="description" content="A live security demo: two AI agents take the same prompt-injection attack. The one with guardrails only in its prompt leaks an API key; the one behind an enforced runtime access layer has nothing to steal - the key never reaches the AI." />
-    <meta property="og:title" content="Vault Boundary - Stop prompt injection from stealing your AI agent's API keys" />
-    <meta property="og:description" content="Two AI agents, the same prompt-injection attack. One leaks an API key; the enforced access-layer agent has nothing to steal. Watch them side by side." />
+    <title>Vault Boundary - An agent cannot leak a key it never holds</title>
+    <meta name="description" content="A live security demo: two AI agents take the same prompt-injection attack. The standard agent loads the key into its context and leaks it; the Vault agent acts through a security layer that holds the key and returns only the result - so there is nothing to steal." />
+    <meta property="og:title" content="Vault Boundary - An agent cannot leak a key it never holds" />
+    <meta property="og:description" content="Same attack, two agents, side by side. One leaks the key. One has nothing to leak - the security layer makes the call and the key never enters the model." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="Vault Boundary - Stop prompt injection from stealing your AI agent's API keys" />
-    <meta name="twitter:description" content="Two AI agents, the same prompt-injection attack. One leaks an API key; the enforced access-layer agent has nothing to steal." />
+    <meta name="twitter:title" content="Vault Boundary - An agent cannot leak a key it never holds" />
+    <meta name="twitter:description" content="Same attack, two agents, side by side. One leaks the key. One has nothing to leak - the key never enters the model." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

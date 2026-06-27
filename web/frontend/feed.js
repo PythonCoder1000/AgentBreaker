@@ -7,7 +7,7 @@
 import { html, useRef, useEffect, useState } from "./ui.js";
 import { Typewriter } from "./markdown.js";
 
-const AGENT_LABEL = { prompt: "Prompt-Only Agent", breaker: "Vault Agent" };
+const AGENT_LABEL = { prompt: "Standard agent", breaker: "Vault agent" };
 
 // One tool call's parameters flattened to a single readable line.
 function paramLine(params) {
