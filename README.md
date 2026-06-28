@@ -170,8 +170,8 @@ against the committed `uv.lock`.
 
 ```bash
 # clone
-git clone https://github.com/PythonCoder1000/brokerai.git
-cd brokerai
+git clone https://github.com/PythonCoder1000/BrokerAI.git
+cd BrokerAI
 
 # install deps (core + the `web` extra)
 uv sync --extra web         # or: pip install -e ".[web]"
@@ -320,7 +320,7 @@ evaluator).
 ## Project structure
 
 ```
-brokerai/
+BrokerAI/
 ├── CLAUDE.md            # Working rules for Claude Code in this repo
 ├── README.md            # You are here
 ├── pyproject.toml       # Deps (core + the `web` extra) — installed via uv
